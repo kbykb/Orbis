@@ -260,6 +260,26 @@ describe("ClaudeModsBridge", () => {
     } finally { bridge.close(); }
   });
 
+  it.each(["failure", "unconfirmed"] as const)("keeps a later local message distinct from a %s phone submission", async status => {
+    const root = await mkdtemp(join(tmpdir(), "orbis-claude-refused-"));
+    const path = join(root, "session.jsonl");
+    const bridge = new ClaudeModsBridge({ createHistory: (id, config, publish) =>
+      new ClaudeSessionHistory(id, config, publish, { locate: async () => path, settleTimeoutMs: 0 }) });
+    try {
+      await writeFile(path, "");
+      const current = online(bridge);
+      const sync = () => bridge.sync(current.runtimeId, { type: "session.sync", sessionId: "session-1", syncId: "s", range: "preview" });
+      await sync();
+      bridge.sendCommand(current.runtimeId, "resume", { type: "user_message", text: "continue", messageId: "phone-resume" });
+      bridge.receiveEvent(current.runtimeId, current.generation, { type: "command.result", commandId: "resume", ok: false, status,
+        error: "the session was stopped and nobody has sent input since" });
+      await appendFile(path, JSON.stringify({ type: "user", uuid: "later-input", parentUuid: null,
+        message: { role: "user", content: "continue" } }) + "\n");
+      const snapshot = await sync();
+      expect(snapshot?.display?.entries[0]?.message?.clientMessageId).toBe(status === "failure" ? undefined : "phone-resume");
+    } finally { bridge.close(); await rm(root, { recursive: true, force: true }); }
+  });
+
   it("publishes streamed output as versioned live state and never turns prompt.submit or session.append into messages", () => {
     const events: RuntimeEvent[] = [];
     const bridge = bridgeWith({ onEvent: (_id, event) => events.push(event) });

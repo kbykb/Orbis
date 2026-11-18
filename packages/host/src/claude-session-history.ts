@@ -137,6 +137,12 @@ export class ClaudeSessionHistory {
     while (this.#prompts.length > MAX_PHONE_PROMPTS) this.#prompts.shift();
   }
 
+  /** A definite refusal cannot claim a later message the person types locally. */
+  rejectPrompt(clientMessageId: string): void {
+    const index = this.#prompts.findIndex(prompt => prompt.clientMessageId === clientMessageId);
+    if (index >= 0) this.#prompts.splice(index, 1);
+  }
+
   readTool(owner: string, request: ToolContentReadRequest, signal?: AbortSignal): Promise<ToolContentPage> {
     if (this.#closed) return Promise.reject(new ToolContentReadError("content_unavailable"));
     return this.#tools.read(owner, request, signal);
