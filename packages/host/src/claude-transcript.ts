@@ -126,8 +126,10 @@ export class ClaudeTranscriptProjection {
         if (item?.type === "text" && typeof item.text === "string" && item.text.length > 0) return [{ type: "text", text: item.text }];
         // Hidden thinking is persisted as an empty string plus a signature; there is nothing to show.
         if (item?.type === "thinking" && typeof item.thinking === "string" && item.thinking.length > 0) {
-          // Native update summaries are visible progress text in the TUI.
-          return row.thinkingDisplay === "updates" ? [{ type: "text", text: item.thinking }]
+          // The TUI marks only narration blocks as summary. thinkingDisplay is
+          // a session preference shared by ordinary thinking, not this distinction.
+          return isNativeNarration(item.signature) && item.thinking.trim().length > 0
+            ? [{ type: "text", text: item.thinking.trim() }]
             : [{ type: "thinking", thinking: item.thinking }];
         }
         if (item?.type === "tool_use" && typeof item.id === "string" && typeof item.name === "string") {
@@ -246,6 +248,50 @@ const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/gu;
 
 function messageEntry(entryId: string, timestamp: string, message: Record<string, unknown>): Omit<RemoteSessionEntry, "parentId"> {
   return { entryId, type: "message", timestamp, data: { message } };
+}
+
+/** Claude Code 2.1.318's summary presentation hint; never forward the signature. */
+function isNativeNarration(signature: unknown): boolean {
+  if (typeof signature !== "string" || signature.length === 0) return false;
+  let value: Uint8Array | undefined;
+  try { value = Buffer.from(atob(signature), "binary"); } catch { return false; }
+  for (const field of [2, 1, 8]) {
+    value = protobufBytes(value, field);
+    if (value === undefined) return false;
+  }
+  return Buffer.from(value).toString("utf8") === "narration";
+}
+
+/** Read the native length-delimited label, skipping the envelope's other wire fields. */
+function protobufBytes(bytes: Uint8Array, field: number): Uint8Array | undefined {
+  let offset = 0;
+  let found: Uint8Array | undefined;
+  const varint = (): number | undefined => {
+    let value = 0;
+    let factor = 1;
+    for (let i = 0; i < 10 && offset < bytes.length; i++, factor *= 128) {
+      const byte = bytes[offset++]!;
+      value += (byte & 127) * factor;
+      if ((byte & 128) === 0) return value;
+    }
+    return undefined;
+  };
+  while (offset < bytes.length) {
+    const tag = varint();
+    if (tag === undefined) return undefined;
+    const wire = tag % 8;
+    if (wire === 0) { if (varint() === undefined) return undefined; }
+    else if (wire === 1) offset += 8;
+    else if (wire === 5) offset += 4;
+    else if (wire === 2) {
+      const length = varint();
+      if (length === undefined || length > bytes.length - offset) return undefined;
+      if (Math.floor(tag / 8) === field) found = bytes.subarray(offset, offset + length);
+      offset += length;
+    } else return undefined;
+    if (offset > bytes.length) return undefined;
+  }
+  return found;
 }
 
 function taskNotification(body: string, timestamp: number): Record<string, unknown> {

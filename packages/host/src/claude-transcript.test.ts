@@ -17,6 +17,9 @@ const user = (uuid: string, parentUuid: string | null, content: unknown, extra: 
 const assistant = (uuid: string, parentUuid: string | null, content: unknown[]) =>
   ({ type: "assistant", uuid, parentUuid, timestamp: at, message: { role: "assistant", model: "claude-opus-5-5", content } });
 const line = (row: unknown) => `${JSON.stringify(row)}\n`;
+// Native protobuf envelope fields 2 → 1 → 8, with no model content or opaque signature bytes.
+const narrationSignature = "Eg0KC0IJbmFycmF0aW9u";
+const thinkingSignature = "EgwKCkIIdGhpbmtpbmc=";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -27,14 +30,39 @@ async function tempConfig(): Promise<string> {
 }
 
 describe("ClaudeTranscriptProjection", () => {
-  it("shows native update summaries as visible text while retaining ordinary thinking", () => {
+  it("shows only blocks the native terminal classifies as narration summaries", () => {
+    const projection = new ClaudeTranscriptProjection();
+    projection.push({ ...assistant("mixed", null, [
+      { type: "thinking", thinking: "Brief internal thought", signature: thinkingSignature },
+      { type: "thinking", thinking: "  正在检查服务器状态。\n", signature: narrationSignature },
+    ]), thinkingDisplay: "updates" });
+    projection.push(assistant("summary-without-preference", "mixed", [
+      { type: "thinking", thinking: "检查已完成。", signature: narrationSignature },
+    ]));
+    expect(projection.entries.map(entry => entry.data.message)).toMatchObject([
+      { content: [{ type: "thinking", thinking: "Brief internal thought" }, { type: "text", text: "正在检查服务器状态。" }] },
+      { content: [{ type: "text", text: "检查已完成。" }] },
+    ]);
+    expect(JSON.stringify(projection.entries)).not.toContain("signature");
+  });
+
+  it("does not expose thinking when its summary label is missing or malformed", () => {
+    const projection = new ClaudeTranscriptProjection();
+    const signatures = [undefined, "narration", "%%%%", narrationSignature.slice(0, -4), thinkingSignature];
+    projection.push({ ...assistant("invalid-labels", null, signatures.map(signature =>
+      ({ type: "thinking", thinking: "Unclassified thought", signature }))), thinkingDisplay: "updates" });
+    const message = projection.entries[0]!.data.message as { content: { type: string }[] };
+    expect(message.content.map(block => block.type)).toEqual(signatures.map(() => "thinking"));
+  });
+
+  it("keeps thinking separate from visible text regardless of native display preference", () => {
     const projection = new ClaudeTranscriptProjection();
     projection.push({ ...assistant("summary", null, [{ type: "thinking", thinking: "The validation is running; I will check the server status." }]),
       thinkingDisplay: "updates" });
     projection.push(assistant("thinking", "summary", [{ type: "thinking", thinking: "Ordinary thinking" }]));
     projection.push({ ...assistant("hidden", "thinking", [{ type: "thinking", thinking: "", signature: "hidden" }]), thinkingDisplay: "updates" });
     expect(projection.entries.map(entry => entry.data.message)).toMatchObject([
-      { role: "assistant", content: [{ type: "text", text: "The validation is running; I will check the server status." }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "The validation is running; I will check the server status." }] },
       { role: "assistant", content: [{ type: "thinking", thinking: "Ordinary thinking" }] },
     ]);
     expect(projection.leafId).toBe("thinking");
@@ -70,13 +98,14 @@ describe("ClaudeTranscriptProjection", () => {
     expect(JSON.stringify(projection.entries)).not.toContain("/private/tmp/task.output");
   });
 
-  it("includes progress, update summaries and native background notices in the phone display batch", async () => {
+  it("includes progress and native background notices without promoting thinking to visible text", async () => {
     const root = await tempConfig();
     const path = join(root, "display.jsonl");
     await writeFile(path, [
       assistant("progress", null, [{ type: "text", text: "Validation is running." }]),
       { ...assistant("summary", "progress", [{ type: "thinking", thinking: "Checking the server now." }]), thinkingDisplay: "updates" },
-      { type: "attachment", uuid: "task", parentUuid: "summary", timestamp: at, attachment: { type: "queued_command",
+      assistant("narration", "summary", [{ type: "thinking", thinking: "正在检查服务器。", signature: narrationSignature }]),
+      { type: "attachment", uuid: "task", parentUuid: "narration", timestamp: at, attachment: { type: "queued_command",
         commandMode: "task-notification", origin: { kind: "task-notification" },
         prompt: '<task-notification><status>completed</status><summary>Background command "Read server metrics" completed (exit code 0)</summary></task-notification>' } },
     ].map(line).join(""));
@@ -85,7 +114,8 @@ describe("ClaudeTranscriptProjection", () => {
       const snapshot = await history.sync({ type: "session.sync", sessionId: "display", syncId: "s", range: "preview" });
       expect(snapshot.display?.entries.map(entry => ({ kind: entry.kind, role: entry.message?.role, content: entry.message?.content }))).toEqual([
         { kind: "message", role: "assistant", content: [{ type: "text", text: "Validation is running." }] },
-        { kind: "message", role: "assistant", content: [{ type: "text", text: "Checking the server now." }] },
+        { kind: "message", role: "assistant", content: [{ type: "thinking", text: "Checking the server now." }] },
+        { kind: "message", role: "assistant", content: [{ type: "text", text: "正在检查服务器。" }] },
         { kind: "message", role: "system", content: [{ type: "text", text: "后台任务已完成：Read server metrics" }] },
       ]);
     } finally { history.close(); }
