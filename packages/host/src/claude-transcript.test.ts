@@ -27,6 +27,19 @@ async function tempConfig(): Promise<string> {
 }
 
 describe("ClaudeTranscriptProjection", () => {
+  it("shows native update summaries as visible text while retaining ordinary thinking", () => {
+    const projection = new ClaudeTranscriptProjection();
+    projection.push({ ...assistant("summary", null, [{ type: "thinking", thinking: "The validation is running; I will check the server status." }]),
+      thinkingDisplay: "updates" });
+    projection.push(assistant("thinking", "summary", [{ type: "thinking", thinking: "Ordinary thinking" }]));
+    projection.push({ ...assistant("hidden", "thinking", [{ type: "thinking", thinking: "", signature: "hidden" }]), thinkingDisplay: "updates" });
+    expect(projection.entries.map(entry => entry.data.message)).toMatchObject([
+      { role: "assistant", content: [{ type: "text", text: "The validation is running; I will check the server status." }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "Ordinary thinking" }] },
+    ]);
+    expect(projection.leafId).toBe("thinking");
+  });
+
   it("presents native task notifications as status and preserves user-supplied markup", () => {
     const projection = new ClaudeTranscriptProjection();
     const notification = '<task-notification><task-id>task</task-id><output-file>/private/tmp/task.output</output-file><status>completed</status><summary>Background command "Record peak metrics" completed (exit code 0)</summary></task-notification>';
@@ -38,6 +51,44 @@ describe("ClaudeTranscriptProjection", () => {
     expect(projection.entries[0]!.data.message).toMatchObject({ role: "system", content: "后台任务已完成：Record peak metrics" });
     expect(projection.entries[1]!.data.message).toMatchObject({ role: "user", content: notification });
     expect(projection.entries.map(row => row.parentId)).toEqual([null, "notification", "actual-user"]);
+  });
+
+  it("projects queued task notification attachments without exposing their model-only rendering", () => {
+    const projection = new ClaudeTranscriptProjection();
+    const prompt = '<task-notification><output-file>/private/tmp/task.output</output-file><status>completed</status><summary>Background command "Read server metrics" completed (exit code 0)</summary></task-notification>';
+    const attachment = { type: "queued_command", commandMode: "task-notification", origin: { kind: "task-notification" }, prompt };
+    projection.push(assistant("progress", null, [{ type: "text", text: "Checking the server while validation runs." }]));
+    projection.push({ type: "attachment", uuid: "notification", parentUuid: "progress", timestamp: at, attachment,
+      rendered: [{ content: "Model-only system reminder" }] });
+    projection.push({ type: "attachment", uuid: "other", parentUuid: "notification", timestamp: at,
+      attachment: { ...attachment, commandMode: "prompt", origin: { kind: "plugin" } } });
+    projection.push(assistant("tool", "other", [{ type: "tool_use", id: "bash", name: "Bash", input: { command: "true" } }]));
+    expect(projection.entries.map(row => row.entryId)).toEqual(["progress", "notification", "tool"]);
+    expect(projection.entries[1]!.data.message).toEqual({ role: "system", content: "后台任务已完成：Read server metrics", timestamp: Date.parse(at) });
+    expect(projection.entries[2]!.parentId).toBe("notification");
+    expect(JSON.stringify(projection.entries)).not.toContain("Model-only");
+    expect(JSON.stringify(projection.entries)).not.toContain("/private/tmp/task.output");
+  });
+
+  it("includes progress, update summaries and native background notices in the phone display batch", async () => {
+    const root = await tempConfig();
+    const path = join(root, "display.jsonl");
+    await writeFile(path, [
+      assistant("progress", null, [{ type: "text", text: "Validation is running." }]),
+      { ...assistant("summary", "progress", [{ type: "thinking", thinking: "Checking the server now." }]), thinkingDisplay: "updates" },
+      { type: "attachment", uuid: "task", parentUuid: "summary", timestamp: at, attachment: { type: "queued_command",
+        commandMode: "task-notification", origin: { kind: "task-notification" },
+        prompt: '<task-notification><status>completed</status><summary>Background command "Read server metrics" completed (exit code 0)</summary></task-notification>' } },
+    ].map(line).join(""));
+    const history = new ClaudeSessionHistory("display", root, () => {}, { locate: async () => path });
+    try {
+      const snapshot = await history.sync({ type: "session.sync", sessionId: "display", syncId: "s", range: "preview" });
+      expect(snapshot.display?.entries.map(entry => ({ kind: entry.kind, role: entry.message?.role, content: entry.message?.content }))).toEqual([
+        { kind: "message", role: "assistant", content: [{ type: "text", text: "Validation is running." }] },
+        { kind: "message", role: "assistant", content: [{ type: "text", text: "Checking the server now." }] },
+        { kind: "message", role: "system", content: [{ type: "text", text: "后台任务已完成：Read server metrics" }] },
+      ]);
+    } finally { history.close(); }
   });
 
   it("updates the Host preview after resuming a long transcript and persisting a new reply", async () => {
@@ -234,10 +285,11 @@ describe("ClaudeSessionHistory", () => {
       expect(gated.entries.map(entry => entry.entryId)).toEqual(["u"]);
       expect(gated.live?.messages).toHaveLength(1);
       // The boundary may arrive before its last disk write; retain the whole streamed response.
-      await history.finishStep("t:0", ["thought", "answer"]);
+      const finishing = history.finishStep("t:0", ["thought", "answer"]);
+      await history.refresh();
       expect(history.source.snapshot().live.messages).toHaveLength(1);
       await appendFile(path, line(assistant("answer", "thought", [{ type: "text", text: "hello" }])));
-      await history.refresh();
+      await finishing;
       const committed = patches.at(-1)!;
       expect(committed.entries?.map(entry => entry.entryId)).toEqual(["thought", "answer"]);
       expect(committed.live?.messages).toEqual([]);

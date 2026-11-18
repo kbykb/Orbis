@@ -31,7 +31,8 @@ let activeTurnId: string | undefined;
 const activeCompactions = new Set<symbol>();
 // Main-loop response rows belong to the native step until its next request or turn completion.
 // A step can append several UUIDs; neither text equality nor row order identifies a message.
-let activeStep: { turnId: string; stepIndex: number; uuids: string[]; target: Connection | undefined } | undefined;
+let activeStep: { turnId: string; stepIndex: number; uuids: string[]; target: Connection | undefined;
+  streamed: boolean; toolsStarted: boolean } | undefined;
 let polling = false;
 let pollingTimer: ReturnType<Api["clock"]["every"]> | undefined;
 let polls = 0;
@@ -147,7 +148,8 @@ export const register: Register = on => {
   on("turn.step", async function* ($, event, next) {
     if (event.agentId === undefined) {
       await finishStep($);
-      activeStep = { turnId: event.turnId, stepIndex: event.index, uuids: [], target: connection ?? await connect($) };
+      activeStep = { turnId: event.turnId, stepIndex: event.index, uuids: [], target: connection ?? await connect($),
+        streamed: false, toolsStarted: false };
     }
     const step = event.agentId === undefined ? activeStep : undefined;
     if (event.agentId === undefined && turnSelection?.turnId === event.turnId) {
@@ -196,7 +198,12 @@ export const register: Register = on => {
       yield chunk;
     }
     await flush();
-    return await stream.result;
+    const result = await stream.result;
+    if (step !== undefined) {
+      step.streamed = true;
+      if (step.toolsStarted && activeStep === step) await finishStep($);
+    }
+    return result;
   });
 
   on("turn.complete", async ($, event, next) => {
@@ -234,6 +241,12 @@ export const register: Register = on => {
         toolName: event.tool, toolCallId: event.tool_use_id,
         arguments: boundedValue(Object.fromEntries(Object.entries(event).filter(([key]) => !RESERVED_TOOL_FIELDS.has(key))), 24_000) });
       return result;
+    }
+    // Native tools can start before the last chunks cross our streaming hook.
+    // Commit only after both storage/tool dispatch and streaming have finished.
+    if (activeStep !== undefined) {
+      activeStep.toolsStarted = true;
+      if (activeStep.streamed) await finishStep($);
     }
     const toolName = event.tool;
     const toolCallId = event.tool_use_id;

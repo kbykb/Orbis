@@ -112,7 +112,9 @@ export class ClaudeSessionHistory {
     const step = this.#steps.get(messageId) ?? { reserved: new Set<string>() };
     step.stored = [...uuids];
     this.#steps.set(messageId, step);
-    await this.refresh();
+    // The append acknowledgement can precede the native file flush. The bridge
+    // starts this asynchronously, so polling these UUIDs never holds up a tool.
+    await this.#refreshUntilRows(uuids);
   }
 
   turnAnchor(announced: readonly string[]): string | undefined {
@@ -147,6 +149,15 @@ export class ClaudeSessionHistory {
     return run;
   }
 
+  async #refreshUntilRows(uuids: readonly string[]): Promise<void> {
+    const deadline = Date.now() + (this.#options.settleTimeoutMs ?? 3_000);
+    for (;;) {
+      await this.refresh().catch(() => undefined);
+      if (this.#closed || uuids.every(uuid => this.hasEntry(uuid)) || Date.now() >= deadline) return;
+      await new Promise(resolve => setTimeout(resolve, this.#options.settleIntervalMs ?? 100));
+    }
+  }
+
   /**
    * Waits until every row the bridge announced for the turn is on disk, then drops the
    * streamed copies. Unmatched streamed text is never kept next to its canonical twin.
@@ -154,14 +165,7 @@ export class ClaudeSessionHistory {
   async settleTurn(announced: readonly string[], messageIds: readonly string[] = this.source.snapshot().live.messages.map(item => item.message.messageId)): Promise<void> {
     // Capture ownership before the first await. A newer turn can start while disk writes settle.
     const owned = new Set(messageIds);
-    const timeout = this.#options.settleTimeoutMs ?? 3_000;
-    const interval = this.#options.settleIntervalMs ?? 100;
-    const deadline = Date.now() + timeout;
-    for (;;) {
-      await this.refresh().catch(() => undefined);
-      if (this.#closed || announced.every(uuid => this.hasEntry(uuid)) || Date.now() >= deadline) break;
-      await new Promise(resolve => setTimeout(resolve, interval));
-    }
+    await this.#refreshUntilRows(announced);
     if (this.#closed) return;
     this.source.transaction(() => {
       this.#commitProjection();

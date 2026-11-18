@@ -67,7 +67,7 @@ export type DisplayProjectionOptions = {
 };
 
 const ROLE_MAP: Record<string, ChatMessage["role"]> = {
-  user: "user", assistant: "assistant", toolResult: "tool", tool: "tool", custom: "custom", bashExecution: "system",
+  user: "user", assistant: "assistant", toolResult: "tool", tool: "tool", custom: "custom", system: "system", bashExecution: "system",
 };
 /** 认识但不显示的条目类型（原生事件，不是对话内容）。 */
 const NOT_RENDERED_TYPES = new Set(["custom", "thinking_level_change", "model_change", "label", "session_info"]);

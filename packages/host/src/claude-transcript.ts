@@ -76,21 +76,20 @@ export class ClaudeTranscriptProjection {
   }
 
   #project(row: Row, uuid: string, timestamp: string): Omit<RemoteSessionEntry, "parentId">[] {
-    const message = record(row.message);
-    if (message === undefined || row.isMeta === true) return [];
     const millis = Date.parse(timestamp);
     const at = Number.isSafeInteger(millis) && millis >= 0 ? millis : 0;
+    const attachment = row.type === "attachment" ? record(row.attachment) : undefined;
+    if (attachment?.type === "queued_command" && attachment.commandMode === "task-notification"
+        && record(attachment.origin)?.kind === "task-notification") {
+      return [messageEntry(uuid, timestamp, taskNotification(plainText(attachment.prompt) ?? "", at))];
+    }
+    const message = record(row.message);
+    if (message === undefined || row.isMeta === true) return [];
     if (row.type === "user") {
       // Claude persists background completions as user rows, but their origin is
       // the session task runner. Keep actual user text (including XML) untouched.
       if (record(row.origin)?.kind === "task-notification" && row.promptSource === "system") {
-        const body = plainText(message.content) ?? "";
-        const status = /<status>([^<]*)<\/status>/u.exec(body)?.[1];
-        const title = status === "completed" ? "后台任务已完成" : status === "failed" ? "后台任务失败"
-          : status === "killed" || status === "cancelled" ? "后台任务已停止" : "后台任务状态已更新";
-        const summary = /<summary>([\s\S]*?)<\/summary>/u.exec(body)?.[1];
-        const command = summary === undefined ? undefined : /^Background command "([\s\S]*)" (?:completed|failed)/u.exec(summary)?.[1];
-        return [messageEntry(uuid, timestamp, { role: "system", content: command ? `${title}：${clip(command)}` : title, timestamp: at })];
+        return [messageEntry(uuid, timestamp, taskNotification(plainText(message.content) ?? "", at))];
       }
       const summary = row.isCompactSummary === true ? plainText(message.content) : undefined;
       if (summary !== undefined) return [{ entryId: uuid, type: "compaction", timestamp, data: { summary } }];
@@ -126,7 +125,11 @@ export class ClaudeTranscriptProjection {
         const item = record(block);
         if (item?.type === "text" && typeof item.text === "string" && item.text.length > 0) return [{ type: "text", text: item.text }];
         // Hidden thinking is persisted as an empty string plus a signature; there is nothing to show.
-        if (item?.type === "thinking" && typeof item.thinking === "string" && item.thinking.length > 0) return [{ type: "thinking", thinking: item.thinking }];
+        if (item?.type === "thinking" && typeof item.thinking === "string" && item.thinking.length > 0) {
+          // Native update summaries are visible progress text in the TUI.
+          return row.thinkingDisplay === "updates" ? [{ type: "text", text: item.thinking }]
+            : [{ type: "thinking", thinking: item.thinking }];
+        }
         if (item?.type === "tool_use" && typeof item.id === "string" && typeof item.name === "string") {
           this.#toolNames.set(item.id, item.name);
           return [{ type: "toolCall", id: item.id, name: item.name, arguments: item.input ?? {} }];
@@ -243,6 +246,15 @@ const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/gu;
 
 function messageEntry(entryId: string, timestamp: string, message: Record<string, unknown>): Omit<RemoteSessionEntry, "parentId"> {
   return { entryId, type: "message", timestamp, data: { message } };
+}
+
+function taskNotification(body: string, timestamp: number): Record<string, unknown> {
+  const status = /<status>([^<]*)<\/status>/u.exec(body)?.[1];
+  const title = status === "completed" ? "后台任务已完成" : status === "failed" ? "后台任务失败"
+    : status === "killed" || status === "cancelled" ? "后台任务已停止" : "后台任务状态已更新";
+  const summary = /<summary>([\s\S]*?)<\/summary>/u.exec(body)?.[1];
+  const command = summary === undefined ? undefined : /^Background command "([\s\S]*)" (?:completed|failed)/u.exec(summary)?.[1];
+  return { role: "system", content: command ? `${title}：${clip(command)}` : title, timestamp };
 }
 
 function plainText(value: unknown): string | undefined {

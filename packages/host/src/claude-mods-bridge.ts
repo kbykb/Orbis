@@ -523,6 +523,9 @@ export class ClaudeModsBridge {
       // Stop completion is owned by the native turn.complete event observed above.
       // A Mods callback or an HTTP response cannot claim that the turn stopped.
       if (pending === undefined || pending.command.type === "stop") return "invalid";
+      if (parsed.error === "the session was stopped and nobody has sent input since") {
+        parsed.error = "消息未发送：Claude Code 在电脑端停止后会拒绝插件提交。请先在电脑端输入一条消息恢复会话，再从手机发送。";
+      }
       if (parsed.status !== "pending") {
         session.commands.delete(parsed.commandId);
         if (session.pendingStopId === parsed.commandId) delete session.pendingStopId;

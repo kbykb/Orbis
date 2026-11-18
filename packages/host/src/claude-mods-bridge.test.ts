@@ -244,6 +244,22 @@ describe("ClaudeModsBridge", () => {
     expect(events.filter(event => event.type === "command.result" && event.commandId === "stop-1")).toHaveLength(2);
   });
 
+  it("explains a native stop refusal without claiming delivery or retrying the message", () => {
+    const events: RuntimeEvent[] = [];
+    const bridge = bridgeWith({ onEvent: (_id, event) => events.push(event) });
+    try {
+      const current = online(bridge);
+      bridge.sendCommand(current.runtimeId, "resume", { type: "user_message", text: "continue", messageId: "phone-resume" });
+      expect(bridge.receiveEvent(current.runtimeId, current.generation, { type: "command.result", commandId: "resume", ok: false,
+        status: "failure", error: "the session was stopped and nobody has sent input since" })).toBe("accepted");
+      expect(events.filter(event => event.type === "command.result")).toEqual([
+        { type: "command.result", commandId: "resume", ok: false, status: "failure",
+          error: "消息未发送：Claude Code 在电脑端停止后会拒绝插件提交。请先在电脑端输入一条消息恢复会话，再从手机发送。" },
+      ]);
+      expect(bridge.poll(current.runtimeId, current.generation)).toMatchObject({ commands: [] });
+    } finally { bridge.close(); }
+  });
+
   it("publishes streamed output as versioned live state and never turns prompt.submit or session.append into messages", () => {
     const events: RuntimeEvent[] = [];
     const bridge = bridgeWith({ onEvent: (_id, event) => events.push(event) });
