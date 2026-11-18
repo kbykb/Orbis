@@ -30,8 +30,18 @@
 
 ## 构建
 
-在本分支提交的独立检出目录构建，输出放在源码目录之外。iOS 使用 Xcode 27.2，Release、`generic/platform=iOS`、`CODE_SIGNING_ALLOWED=NO`、`CODE_SIGNING_REQUIRED=NO`，构建号为 `2026111802`，将主 App 连同两个内嵌扩展放入 `Payload/` 后打包。
+在本分支提交的独立检出目录构建，输出放在源码目录之外。iOS 使用 Xcode 27.2，Release、`generic/platform=iOS`、`CODE_SIGNING_ALLOWED=NO`、`CODE_SIGNING_REQUIRED=NO`，本次目标／历史修复包构建号为 `2026111804`，将主 App 连同两个内嵌扩展放入 `Payload/` 后打包。
 
 Android 使用项目已有 Gradle Wrapper 和 `:app:assembleRelease`，签名属性名及配置方式见 `android/app/build.gradle.kts`。需要 JDK 17、Android SDK 35，以及项目原生 QUIC 构建所需的 Go / NDK。凭据应放在构建环境或用户私有配置目录，不能加入提交。
 
 Release 的 IPA 为 iOS 17+ / arm64 包；APK 的最低版本和 ABI 以最终发布说明列出的包检查结果为准。
+
+## 后续修复：目标控制与长会话历史
+
+- Codex／Codex Desktop 新增原生目标查看、编辑、暂停和恢复入口，通过 `thread/goal/*` 操作原有目标。不会向聊天记录追加控制消息，不改变模型或供应商配置。原生端不支持该接口时，会隐藏入口并说明需要更新。
+- Codex 历史重建保留同一运行期的来源 epoch，继续递增 seq；清理重建前的分页缓存并拒绝迟到旧页，避免长会话耗尽退役 epoch 记录后持续同步失败。保留原有上限和旧状态拒绝保护。
+- Claude 后台任务完成通知改为简短的系统状态，避免将内部 XML 显示为用户输入；用户自己发送的 XML 保持原样。
+- 插话能力缺失时明确提示旧窗口需要在本轮结束后执行 `/reload-plugins`；这项提示不会给已加载的旧插件增加能力。
+- 历史同步失败使用对应提示，避免误认为消息发送失败。
+
+相关 Host／协议测试、iOS 核心目标与发送测试、Android 目标与发送测试已通过；iOS 模拟器已验证目标读取、编辑、暂停和恢复。未使用生产目标做写入验收。IPA 仍需侧载签名；Android 包继续使用 fork 发布证书。

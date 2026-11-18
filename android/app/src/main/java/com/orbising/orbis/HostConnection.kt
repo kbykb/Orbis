@@ -2079,6 +2079,14 @@ internal class HostConnection(
         updateState { it.copy(commandResults = it.commandResults - commandId) }
     }
 
+    fun executeSessionGoal(runtimeId: String, command: SessionGoalCommand): String? {
+        val current = mutableState.value
+        if (!current.e2eReady || current.runtimes[runtimeId]?.goalSupported != true) return null
+        val commandId = relay.sendToolCommand(runtimeId, command.payload())
+        trackCommand(commandId, runtimeId, L10n.tr("目标操作未发送，请连接电脑后重试"))
+        return commandId
+    }
+
     fun stopRuntime(): String? {
         val runtimeId = mutableState.value.selectedRuntimeId ?: return null
         val commandId = relay.stop(runtimeId)

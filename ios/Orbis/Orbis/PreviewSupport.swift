@@ -658,6 +658,8 @@ private final class PreviewTransport: OrbisTransport {
     func setRelayTransportMode(_ mode: RelayTransportMode) { relayTransportMode = mode }
     var sequence = 0
     private var archivedSessionIds: Set<String> = []
+    private var goalObjective = "确认移动端目标控制可用"
+    private var goalStatus = "active"
     private var providerRevision = 1
     /// Each repeated subscription read reports one point less, so a refresh is observable.
     private var quotaReads = 0
@@ -732,6 +734,7 @@ private final class PreviewTransport: OrbisTransport {
                 ["runtimeId": "preview-pi", "sessionId": "session-2", "sessionName": "梳理项目中的页面结构", "name": "Pi", "cwd": "/Projects/website", "status": "running", "agentKind": "pi"],
                 ["runtimeId": "preview-dsh", "sessionId": "session-3", "sessionName": "检查服务端连接状态", "name": "DeepSeek", "cwd": "/Projects/orbis", "status": "idle", "agentKind": "dsh"]
             ]
+            if ProcessInfo.processInfo.arguments.contains("--preview-goal") { runtimes[0]["goalSupported"] = true }
             if self.claudeIdentity || self.sendMode == "claude-busy" {
                 runtimes[0]["agentKind"] = "claude"
                 runtimes[0]["name"] = "Claude Code"
@@ -1055,6 +1058,7 @@ private final class PreviewTransport: OrbisTransport {
                 var value: [String: Any] = name == "identity" ? ["runtimeId": runtime, "sessionId": session,
                     "name": agentTitle(kind), "sessionName": session == "replacement" ? "已完整切换的会话" : titles[runtime] ?? "滚动测试会话 \(session)", "cwd": cwd, "agentKind": kind] :
                     name == "interactions" ? previewInteractions(runtime) : name == "execution" ? ["phase": "idle", "waitingFor": [], "retry": "unavailable", "compaction": compacting && runtime == "preview-codex" ? ["phase": "running"] : "unavailable", "turn": ["turnId": "preview-turn", "startedAt": 1793232000000, "durationMs": 3240]] : name == "model" ? ["provider": "openai", "id": "gpt-5.4", "name": modelName, "thinkingLevel": "high"] : ["tokens": 24000, "contextWindow": 128000, "percent": 18.75]
+                if name == "identity", runtime == "preview-codex", ProcessInfo.processInfo.arguments.contains("--preview-goal") { value["goalSupported"] = true }
                 if name == "execution", (keyboardStream || sendMode == "claude-busy"), runtime == "preview-codex" { value["phase"] = "running" }
                 if ProcessInfo.processInfo.arguments.contains("--preview-current-turn"), runtime == "preview-codex" {
                     if name == "execution" { value["phase"] = "running" }
@@ -1156,7 +1160,13 @@ private final class PreviewTransport: OrbisTransport {
             }
         } else if let command = object["command"] as? [String: Any], let type = command["type"] as? String {
             let runtime = object["runtimeId"] as? String ?? "preview-codex"
-            if type == "session.sync" {
+            if type == "session.goal.read" || type == "session.goal.set" {
+                if let objective = command["objective"] as? String { goalObjective = objective }
+                if let status = command["status"] as? String { goalStatus = status }
+                event(["type": "session.goal", "goal": ["threadId": "session-1", "objective": goalObjective, "status": goalStatus,
+                    "tokenBudget": 100000, "tokensUsed": 24000, "timeUsedSeconds": 60, "createdAt": 1, "updatedAt": 2]], runtimeId: runtime)
+                event(["type": "command.result", "commandId": object["commandId"]!, "ok": true, "status": "success"], runtimeId: runtime)
+            } else if type == "session.sync" {
                 if historyPrepend {
                     replyHistoryPrepend(command, runtime: runtime)
                     return

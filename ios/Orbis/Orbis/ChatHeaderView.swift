@@ -96,6 +96,7 @@ struct ChatHeaderView: View, Equatable {
     let onHistory: () -> Void
     let onDownloads: () -> Void
     @State private var runtimeInfoOpen = false
+    @State private var goalOpen = false
     private var facts: ChatHeaderState { model.header }
     private var runtime: RuntimeSummary { facts.runtime ?? fallbackRuntime }
     private var kind: String? { facts.kind }
@@ -150,6 +151,10 @@ struct ChatHeaderView: View, Equatable {
                 .accessibilityHint(L10n.tr("模型与深度")).accessibilityIdentifier("chat-title")
                 .accessibilityAddTraits(.isButton)
         } trailing: {
+            if runtime.goalSupported == true {
+                OrbisIconButton(symbol: "scope", label: L10n.tr("目标")) { composerFocus.focused = false; goalOpen = true }
+                    .accessibilityIdentifier("chat-goal")
+            }
             OrbisIconButton(symbol: "clock.arrow.circlepath", label: L10n.tr("历史与分支"), action: onHistory)
             OrbisIconButton(symbol: "arrow.down.to.line", label: L10n.tr("下载"), action: onDownloads)
                 .downloadFlightTarget(downloadFlight).accessibilityIdentifier("chat-downloads")
@@ -157,6 +162,9 @@ struct ChatHeaderView: View, Equatable {
         .accessibilityElement(children: .contain).accessibilityIdentifier("chat-navigation-bar")
         .orbisBottomSheet(isPresented: $runtimeInfoOpen) {
             SessionModelConfigurationView(target: target, fallbackRuntime: actions.runtime ?? fallbackRuntime).orbisSheet([.medium, .large])
+        }
+        .orbisBottomSheet(isPresented: $goalOpen) {
+            SessionGoalView(connection: actions.connection, target: target).orbisSheet([.large])
         }
     }
 

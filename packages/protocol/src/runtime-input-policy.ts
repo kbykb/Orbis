@@ -4,6 +4,7 @@ import type { RuntimeCommand } from "./index.js";
 export const runtimeInputOwners = {
   user_message: "backend", "user_message.cancel": "backend", "slash.execute": "backend",
   "permissions.update": "backend", stop: "backend", "interaction.respond": "backend",
+  "session.goal.read": "backend", "session.goal.set": "backend",
   "session.sync": "history", "session.snapshot.ack": "history", "session.entry.request": "history",
   "session.tools.open": "tools", "session.tools.read": "tools",
   "session.tool.content.read": "tools", "session.tool.content.cancel": "tools",

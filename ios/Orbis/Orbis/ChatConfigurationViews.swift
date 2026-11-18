@@ -1,5 +1,63 @@
 import SwiftUI
 
+struct SessionGoalView: View {
+    @ObservedObject var connection: HostConnection
+    let target: ChatActionContext
+    @EnvironmentObject private var store: OrbisStore
+    @Environment(\.colorScheme) private var scheme
+    @OrbisDismiss private var dismiss
+    @State private var objective = ""
+    @State private var edited = false
+    @FocusState private var objectiveFocused: Bool
+    private var runtimeId: String { target.runtimeId ?? "" }
+    private var state: SessionGoalState { connection.sessionGoals[runtimeId] ?? SessionGoalState() }
+    private var enabled: Bool { target.isCurrent(in: store) && connection.canSend && !state.pending }
+    private func read() { _ = connection.requestGoal(runtimeId: runtimeId, sessionId: target.sessionId) }
+    var body: some View {
+        let palette = OrbisPalette(scheme)
+        VStack(spacing: 0) {
+            OrbisPageHeader(title: L10n.tr("目标"), closes: true, back: { dismiss() }) {
+                OrbisIconButton(symbol: "arrow.clockwise", label: L10n.tr("重新读取")) { if enabled { read() } }
+                    .disabled(!enabled).accessibilityIdentifier("goal-refresh")
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if state.pending { ProgressView(L10n.tr("正在同步目标…")) }
+                    if let error = state.error {
+                        Text(error).foregroundStyle(palette.error).accessibilityIdentifier("goal-error")
+                    }
+                    if let goal = state.goal {
+                        Text(goal.statusTitle).font(.orbisBody(.semibold)).accessibilityIdentifier("goal-status")
+                        Text(L10n.tr("已用 {0} tokens", String(goal.tokensUsed))).font(.orbisCaption()).foregroundStyle(palette.secondary)
+                        if let budget = goal.tokenBudget {
+                            Text(L10n.tr("预算 {0} tokens", String(budget))).font(.orbisCaption()).foregroundStyle(palette.secondary)
+                        }
+                    } else if state.loaded {
+                        Text(L10n.tr("当前会话没有目标")).foregroundStyle(palette.secondary)
+                    }
+                    Text(L10n.tr("目标内容")).font(.orbisLabel(.semibold))
+                    TextEditor(text: Binding(get: { objective }, set: { objective = $0; edited = true }))
+                        .focused($objectiveFocused).scrollContentBackground(.hidden)
+                        .frame(minHeight: 160).padding(8).neuSurface(radius: OrbisRadius.control, intensity: 0.6)
+                        .accessibilityIdentifier("goal-objective")
+                    OrbisActionButton(title: L10n.tr(state.goal == nil ? "设置目标" : "保存目标")) {
+                        if enabled, connection.requestGoal(runtimeId: runtimeId, sessionId: target.sessionId, objective: objective) { edited = false; objectiveFocused = false }
+                    }.disabled(!enabled || !state.loaded || objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("goal-save")
+                    if let goal = state.goal, goal.status != "complete" {
+                        OrbisActionButton(title: L10n.tr(goal.status == "active" ? "暂停目标" : "继续目标"), symbol: goal.status == "active" ? "pause" : "play") {
+                            if enabled { _ = connection.requestGoal(runtimeId: runtimeId, sessionId: target.sessionId, status: goal.status == "active" ? "paused" : "active") }
+                        }.disabled(!enabled).accessibilityIdentifier("goal-toggle")
+                    }
+                }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear { if target.isCurrent(in: store) { read() } }
+        .onChange(of: state.goal, initial: true) { _, goal in if !edited { objective = goal?.objective ?? "" } }
+        .accessibilityIdentifier("session-goal-panel")
+    }
+}
+
 struct PermissionsView: View {
     @EnvironmentObject private var store: OrbisStore
     @OrbisDismiss private var dismiss

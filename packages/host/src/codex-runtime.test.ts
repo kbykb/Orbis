@@ -15,6 +15,7 @@ import { SESSION_SYNC_PAGE_BYTES, SESSION_SYNC_WRAPPER_BYTES, RuntimeEventSchema
 
 import { AgentStateFacts } from "./agent-state-facts.js";
 import { AgentStateRegistry } from "./agent-state-registry.js";
+import { AgentConversationState } from "./agent-conversation-state.js";
 import { CODEX_RUNTIME_ID, CodexRequestError, type CodexAppServer, type CodexServerRequest } from "./codex-daemon.js";
 import { CodexRuntime, codexHeadWindowLaunch } from "./codex-runtime.js";
 import type { CodexTerminalConnectionInput } from "./codex-terminal-connection.js";
@@ -169,6 +170,65 @@ function syncHistory(h: ReturnType<typeof makeHarness>, options: Partial<Session
   h.runtime.handleCommand(command, "sync-command", command.sessionId);
   return h.events.slice(start).find((event) => event.type === "session.snapshot");
 }
+
+describe("Codex goal management", () => {
+  const goal = (threadId = "th-1", status = "active") => ({ threadId, objective: "Finish the feature", status,
+    tokenBudget: 100_000, tokensUsed: 21, timeUsedSeconds: 12, createdAt: 1, updatedAt: 2 });
+
+  it.each([false, true])("routes reads and edits to the selected native thread (desktop=%s)", async desktop => {
+    const h = makeHarness({ desktop });
+    await activate(h); await activate(h, "th-2");
+    const runtimeId = `${desktop ? "codex-desktop" : "codex"}:th-1`;
+    expect(h.runtime.dispatchCommand(runtimeId, "read-goal", { type: "session.goal.read" })).toBe("handled");
+    expect(h.requests).toHaveBeenLastCalledWith("thread/goal/get", { threadId: "th-1" });
+    h.resolveNext({ goal: goal() });
+    await vi.waitFor(() => expect(h.events).toContainEqual({ type: "session.goal", goal: goal() }));
+    h.runtime.dispatchCommand(runtimeId, "edit-goal", { type: "session.goal.set", objective: "Finish the revised feature" });
+    expect(h.requests).toHaveBeenLastCalledWith("thread/goal/set", { threadId: "th-1", objective: "Finish the revised feature", origin: "user" });
+    h.resolveNext({ goal: { ...goal(), objective: "Finish the revised feature" } });
+    await vi.waitFor(() => expect(h.events).toContainEqual({ type: "command.result", commandId: "edit-goal", ok: true, status: "success" }));
+  });
+
+  it("pauses and resumes with explicit user provenance and publishes native notifications", async () => {
+    const h = makeHarness(); await activate(h);
+    for (const status of ["paused", "active"] as const) {
+      h.runtime.dispatchCommand("codex:th-1", status, { type: "session.goal.set", status });
+      expect(h.requests).toHaveBeenLastCalledWith("thread/goal/set", { threadId: "th-1", status, origin: "user" });
+      h.resolveNext({ goal: goal("th-1", status) });
+      await vi.waitFor(() => expect(h.events).toContainEqual({ type: "command.result", commandId: status, ok: true, status: "success" }));
+    }
+    h.notify("thread/goal/updated", { threadId: "th-1", turnId: null, goal: goal("th-1", "budgetLimited") });
+    expect(h.events.at(-1)).toEqual({ type: "session.goal", goal: goal("th-1", "budgetLimited") });
+    h.notify("thread/goal/cleared", { threadId: "th-1" });
+    expect(h.events.at(-1)).toEqual({ type: "session.goal", goal: null });
+  });
+
+  it("keeps missing goals empty and rejects cross-thread or malformed native replies", async () => {
+    const h = makeHarness(); await activate(h);
+    h.runtime.dispatchCommand("codex:th-1", "absent", { type: "session.goal.read" }); h.resolveNext({ goal: null });
+    await vi.waitFor(() => expect(h.events).toContainEqual({ type: "session.goal", goal: null }));
+    h.events.length = 0;
+    h.runtime.dispatchCommand("codex:th-1", "wrong-thread", { type: "session.goal.read" }); h.resolveNext({ goal: goal("other") });
+    await vi.waitFor(() => expect(h.events).toContainEqual(expect.objectContaining({ commandId: "wrong-thread", ok: false, error: "codex_goal_thread_mismatch" })));
+    expect(h.events.some(event => event.type === "session.goal")).toBe(false);
+    h.notify("thread/goal/updated", { threadId: "th-1", turnId: null, goal: goal("other") });
+    expect(h.events.some(event => event.type === "session.goal")).toBe(false);
+  });
+
+  it("reports lost mutation replies as unconfirmed and disables unsupported native versions", async () => {
+    const h = makeHarness(); await activate(h);
+    h.runtime.dispatchCommand("codex:th-1", "lost", { type: "session.goal.set", status: "paused" });
+    h.rejectNext(new CodexRequestError("reply lost", "unconfirmed"));
+    await vi.waitFor(() => expect(h.events).toContainEqual({ type: "command.result", commandId: "lost", ok: false, status: "unconfirmed", error: "reply lost" }));
+    h.runtime.dispatchCommand("codex:th-1", "old", { type: "session.goal.read" });
+    h.rejectNext(new CodexRequestError("Method not found", "rejected", -32601));
+    await vi.waitFor(() => expect(h.events).toContainEqual(expect.objectContaining({ commandId: "old", ok: false, status: "failure", error: expect.stringContaining("不支持目标管理") })));
+    expect(h.events.filter(event => event.type === "runtime.metadata").at(-1)?.metadata.goalSupported).toBe(false);
+    const requests = h.requests.mock.calls.length;
+    h.runtime.dispatchCommand("codex:th-1", "old-again", { type: "session.goal.read" });
+    expect(h.requests.mock.calls.length).toBe(requests);
+  });
+});
 
 // Child lifecycles belong to execution.tasks for both native transports; main input stays independent.
 describe("Codex CLI/Desktop child task integration", () => {
@@ -924,7 +984,7 @@ describe("Codex recoverable source checkpoints", () => {
       h.resolveNext({ data: [first] });
       await vi.waitFor(() => expect(h.events.filter(event => event.type === "session.patch").at(-1))
         .toMatchObject({ head: { leafId: "a" }, source: { ready: true } }));
-      expect(syncHistory(h)?.source?.epoch).not.toBe(epoch);
+      expect(syncHistory(h)?.source?.epoch).toBe(epoch);
       expect(syncHistory(h)?.entries.map(entry => entry.entryId)).toEqual(["a"]);
     } finally {
       vi.clearAllTimers();
@@ -960,7 +1020,7 @@ describe("Codex recoverable source checkpoints", () => {
     expect(syncHistory(h)?.entries).toEqual([]);
   });
 
-  it("repairs stale parents after a missed revert and retires the old source epoch", async () => {
+  it("repairs stale parents after a missed revert with the same writer and a newer checkpoint", async () => {
     const h = makeHarness();
     await resume(h, [{ id: "t1", status: "completed", items: [agent("a")] },
       { id: "t2", status: "completed", items: [agent("b"), agent("r")] }]);
@@ -975,7 +1035,8 @@ describe("Codex recoverable source checkpoints", () => {
     await vi.waitFor(() => expect(syncHistory(h)?.entries.map(entry => [entry.entryId, entry.parentId]))
       .toEqual([["a", null], ["c", "a"], ["d", "c"]]));
     const after = syncHistory(h);
-    expect(after?.source?.epoch).not.toBe(before?.source?.epoch);
+    expect(after?.source?.epoch).toBe(before?.source?.epoch);
+    expect(after?.source?.seq).toBeGreaterThan(before!.source!.seq);
     expect(after?.source?.ready).toBe(true);
     h.notify("item/completed", { threadId: "th-1", turnId: "t2", item: agent("r") });
     expect(syncHistory(h)?.entries).toEqual(after?.entries);
@@ -991,6 +1052,35 @@ describe("Codex recoverable source checkpoints", () => {
       { id: "t2", status: "completed", items: [agent("b")] }] });
     await vi.waitFor(() => expect(syncHistory(h)?.cursor.leafId).toBe("b"));
     expect(syncHistory(h)?.source?.epoch).toBe(before?.source?.epoch);
+  });
+
+  it("keeps more than 64 native history rebuilds recoverable without retiring the active writer", async () => {
+    const h = makeHarness();
+    const registry = new AgentStateRegistry();
+    const model = new AgentConversationState(registry);
+    const scope = { kind: "agent" as const, key: { hostId: "host", agentKind: "codex" as const, sessionId: "th-1" } };
+    const rejected: string[] = [];
+    h.runtime.setEventSink(event => {
+      h.events.push(event);
+      if (event.type === "session.snapshot" || event.type === "session.patch") model.accept(scope, event, undefined, reason => rejected.push(reason));
+    });
+    await resume(h, [{ id: "t", status: "completed", items: [agent("a", "original")] }]);
+    const original = syncHistory(h)!;
+    for (let index = 0; index < 70; index++) {
+      h.notify("thread/reverted", { threadId: "th-1" });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      h.resolveNext({ data: [{ id: "t", status: "completed", items: [agent("a", `revision-${index}`)] }] });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const replacement = syncHistory(h, { knownState: { epoch: original.source!.epoch, seq: original.source!.seq, head: original.checkpoint!.head } })!;
+      expect(replacement).toMatchObject({ selection: "snapshot", mode: "replace", source: { epoch: original.source!.epoch, ready: true } });
+      expect(model.hasBaseline(scope)).toBe(true);
+    }
+    expect(rejected).toEqual([]);
+    expect(registry.read(scope, "history")?.availability).toBe("ready");
+    expect(model.accept(scope, original)).toBe(false);
+    expect(model.accept(scope, { ...original, range: "history" })).toBe(false);
+    expect(model.recover(scope, { type: "session.sync", sessionId: "th-1", syncId: "after-rebuilds", range: "preview" })?.entries)
+      .toMatchObject([{ data: { message: { content: [{ type: "text", text: "revision-69" }] } } }]);
   });
 
   it("rereads a buffered completed item that differs from the overlapping native read", async () => {
@@ -1161,7 +1251,8 @@ describe("Codex recoverable source checkpoints", () => {
       await vi.waitFor(() => expect(h.events.find(event => event.type === "session.snapshot" && event.syncId === "after-missed-revert"))
         .toMatchObject({ selection: "snapshot", entries: [expect.objectContaining({ entryId: "a" })] }));
       const response = h.events.find(event => event.type === "session.snapshot" && event.syncId === "after-missed-revert");
-      expect(response?.type === "session.snapshot" && response.source?.epoch).not.toBe(knownState.epoch);
+      expect(response?.type === "session.snapshot" && response.source?.epoch).toBe(knownState.epoch);
+      expect(response?.type === "session.snapshot" && response.source?.seq).toBeGreaterThan(knownState.seq);
     } finally { date.mockRestore(); }
   });
 
@@ -2700,7 +2791,8 @@ describe("CodexRuntime", () => {
     })));
     const finalSnapshot = syncHistory(h);
     expect(finalSnapshot?.entries.map(entry => [entry.entryId, entry.parentId])).toEqual([["b", null], ["a", "b"]]);
-    expect(finalSnapshot?.source?.epoch).not.toBe(replayed?.source?.epoch);
+    expect(finalSnapshot?.source?.epoch).toBe(replayed?.source?.epoch);
+    expect(finalSnapshot?.source?.seq).toBeGreaterThan(replayed!.source!.seq);
   });
 
   it("reconciles an external thread/reverted notification without issuing another revert", async () => {

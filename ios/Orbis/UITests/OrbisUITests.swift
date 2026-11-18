@@ -16,6 +16,30 @@ import UIKit
 final class OrbisUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
+    func testNativeGoalPanelReadsEditsPausesAndResumes() {
+        let app = launch("chat", arguments: ["--preview-goal", "--preview-reduce-motion"])
+        let entry = app.buttons["chat-goal"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 8))
+        entry.tap()
+        let status = app.staticTexts["goal-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "进行中")
+        let toggle = app.buttons["goal-toggle"]
+        toggle.tap()
+        XCTAssertTrue(app.staticTexts["已暂停"].waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertTrue(app.staticTexts["进行中"].waitForExistence(timeout: 5))
+        let objective = app.textViews["goal-objective"]
+        objective.tap()
+        objective.typeText(" mobile check")
+        app.buttons["goal-save"].tap()
+        XCTAssertTrue((objective.value as? String)?.contains("mobile check") == true)
+        let settled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: app.buttons["goal-save"])
+        wait(for: [settled], timeout: 5)
+        capture("native-goal-panel", app: app)
+        app.terminate()
+    }
+
     func testActionFeedbackKeepsTargetsAndCancelsWithoutDispatchInAllAppearances() {
         for dark in [false, true] {
             for reduced in [false, true] {

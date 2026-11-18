@@ -7,6 +7,8 @@ export * from "./turn-configuration.js";
 import { SessionConfigurationReadSchema, SessionConfigurationSaveSchema, ConfiguredSessionLaunchSchema, SessionLaunchReadSchema,
   SessionConfigurationResultSchema, SessionLaunchResultSchema } from "./session-configuration.js";
 export * from "./session-configuration.js";
+import { SessionGoalReadSchema, SessionGoalSetSchema, SessionGoalEventSchema } from "./session-goal.js";
+export * from "./session-goal.js";
 export { orbisEnvironment } from "./product-environment.js";
 export { parseQaActivation, type QaActivation } from "./qa-activation.js";
 import {
@@ -215,6 +217,7 @@ export const RuntimeMetadataSchema = z.strictObject({
   status: RuntimeStatusSchema,
   sessionId: z.string().min(1).max(256).optional(),
   sessionGraphSync: z.boolean().optional(),
+  goalSupported: z.boolean().optional(),
   sessionLeafId: z.string().max(256).nullable().optional(),
   // Machine identity of the Pi host. Needs no user setup, so the APP can tell Pi processes
   // apart across devices. 可选的原因是 `os.hostname()` 可能抛——不是兼容旧中继。
@@ -890,6 +893,7 @@ export type RuntimeCommandStatus = z.infer<typeof RuntimeCommandStatusSchema>;
  */
 
 export const RuntimeEventSchema = z.discriminatedUnion("type", [
+  SessionGoalEventSchema,
   TurnChangesSummariesSchema, TurnChangesUpdatedSchema, TurnChangesPageSchema, FileChangeDetailPageSchema, TurnChangesFailedSchema,
   z.strictObject({ type: z.literal("tool.activity"), summary: ToolSummarySchema }),
   ToolContentPageSchema, ToolReadFailureSchema, ToolInventoryPageSchema, ToolInventoryPatchSchema, ToolInventoryChangedSchema, ToolInventoryProducedSchema, ToolInventoryOpenedSchema,
@@ -1058,6 +1062,7 @@ export type RuntimeEvent = z.infer<typeof RuntimeEventSchema>;
 const downloadOffset = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional();
 
 export const RuntimeCommandSchema = z.discriminatedUnion("type", [
+  SessionGoalReadSchema, SessionGoalSetSchema,
   TurnChangesListRequestSchema, TurnChangesReadRequestSchema, FileChangeDetailReadRequestSchema, FileChangeDetailCancelSchema,
   ToolContentReadRequestSchema, ToolContentCancelSchema, ToolInventoryReadRequestSchema, ToolInventoryOpenRequestSchema,
   z.strictObject({ type: z.literal("file.download"), path: z.string().min(1), offset: downloadOffset }),

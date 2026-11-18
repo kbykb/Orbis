@@ -177,7 +177,7 @@ internal fun pendingSendFailureText(status: String?, error: String?): String = w
     error == "runtime_busy" -> L10n.tr("会话正在运行，请选择插入或完成后发送")
     error == "权限设置尚未确认，请稍后重试" -> L10n.tr("权限设置尚未确认，请稍后重试")
     error == "权限设置正在保存，请稍后重试" -> L10n.tr("权限设置正在保存，请稍后重试")
-    error == "claude_steer_unsupported" -> L10n.tr("Claude Code 不支持插入当前任务")
+    error == "claude_steer_unsupported" -> L10n.tr("当前 Claude Code 窗口仍在使用旧插件；请在本轮结束后执行 /reload-plugins，再重试插话")
     !error.isNullOrEmpty() -> error
     else -> L10n.tr("电脑端没有接受这条消息")
 }

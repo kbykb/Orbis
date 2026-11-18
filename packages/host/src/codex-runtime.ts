@@ -34,6 +34,7 @@ import { ToolContentCapture, ToolContentReadError, type ToolContentReader, type 
 import { CodexToolContentReader } from "./codex-tool-content-reader.js";
 import { CodexAgentTasks, codexChildThread } from "./codex-agent-tasks.js";
 import { CodexTaskRegistry } from "./codex-task-registry.js";
+import { codexGoal } from "./codex-goal.js";
 import { readCodexTurnConfiguration } from "./codex-turn-configuration.js";
 import { codexToolContents, codexToolContentText, codexToolSummary } from "./codex-tool-projection.js";
 
@@ -338,6 +339,8 @@ type ThreadState = {
   lastNativeCheckAt: number;
   /** Source-side checkpoint identity; independent from transport sequence numbers. */
   sourceEpoch: string;
+  /** Conditional syncs captured before a history rebuild need a complete replacement. */
+  sourceResetSeq: number;
   sourceSeq: number;
   /** 分页预处理缓存（ADR-0035 §10）。条目集变化时 invalidate。 */
   preparer: SessionSyncPreparer;
@@ -369,6 +372,7 @@ export class CodexRuntime implements AgentBackend {
   }>();
   readonly #permissionUnconfirmed = new Map<string, { name: string; value: string }>();
   #started = false;
+  #goalSupported = true;
   #eventSink: ((event: RuntimeEvent, threadId: string | undefined) => void) | undefined;
   /**
    * `model/list` 的缓存：app-server 的 thread 快照不带 model，只有这里能问出
@@ -747,6 +751,7 @@ export class CodexRuntime implements AgentBackend {
       nativeSourceDirty: false,
       lastNativeCheckAt: Date.now(),
       sourceEpoch: randomUUID(),
+      sourceResetSeq: 0,
       sourceSeq: 0,
       preparer: new SessionSyncPreparer(),
       sourceReady: false,
@@ -813,6 +818,7 @@ export class CodexRuntime implements AgentBackend {
       sessionId: this.#publicSessionId(thread.id),
       ...(thread.name === undefined ? {} : { sessionName: thread.name }),
       sessionGraphSync: true,
+      goalSupported: this.#goalSupported,
       sessionLeafId: thread.entries.at(-1)?.entryId ?? null,
       ...(model === undefined ? {} : { model }),
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
@@ -1934,10 +1940,9 @@ export class CodexRuntime implements AgentBackend {
     const rewritten = prior.entries.some((old, index) =>
       !isDeepStrictEqual(thread.entries[index], old));
     if (rewritten && !epochStarted) {
-      // A missed revert or corrected native item invalidates the old cache generation.
-      // Announce the boundary before ready; delayed pages/patches cannot restore old edges.
-      thread.sourceEpoch = randomUUID();
-      thread.sourceSeq = 0;
+      // This writer is still the same runtime. A monotonic unknown checkpoint invalidates
+      // its old graph without consuming another retired-source tombstone on every rebuild.
+      thread.sourceResetSeq = thread.sourceSeq + 1;
       thread.sourceReady = false;
       this.#touchSource(thread);
     }
@@ -2189,6 +2194,36 @@ export class CodexRuntime implements AgentBackend {
       case "permissions.update": {
         if (thread === undefined) return this.#slashNoSession(threadId, commandId);
         void this.#updatePermissions(thread, command.settingId, command.value, commandId);
+        return true;
+      }
+      case "session.goal.read":
+      case "session.goal.set": {
+        if (thread === undefined) return this.#slashNoSession(threadId, commandId);
+        if (!this.#goalSupported) {
+          this.#commandResult(thread.id, commandId, false, "当前 Codex 版本不支持目标管理，请更新 Codex", "failure");
+          return true;
+        }
+        this.#commandResult(thread.id, commandId, true, undefined, "pending");
+        const { type, ...values } = command;
+        const method = type === "session.goal.read" ? "thread/goal/get" : "thread/goal/set";
+        void this.#server.request(method, {
+          threadId: thread.id,
+          ...(type === "session.goal.set" ? { ...values, origin: "user" } : {}),
+        }).then(result => {
+          const goal = codexGoal(object(result).goal, thread.id);
+          if (type === "session.goal.set" && goal === null) throw new Error("codex_goal_update_unconfirmed");
+          this.#emit(thread.id, { type: "session.goal", goal });
+          this.#commandResult(thread.id, commandId, true, undefined, "success");
+        }).catch(error => {
+          if (error instanceof CodexRequestError && error.code === -32601) {
+            this.#goalSupported = false;
+            for (const active of this.#threads.values()) this.#publishMetadataEvent(active);
+            this.#commandResult(thread.id, commandId, false, "当前 Codex 版本不支持目标管理，请更新 Codex", "failure");
+            return;
+          }
+          this.#commandResult(thread.id, commandId, false, describeError(error),
+            error instanceof CodexRequestError && error.outcome === "unconfirmed" ? "unconfirmed" : "failure");
+        });
         return true;
       }
       case "slash.execute": {
@@ -2767,13 +2802,11 @@ export class CodexRuntime implements AgentBackend {
   }
 
   /**
-   * Establish a new source generation before native history is rebuilt. A revert changes the
-   * canonical head and may invalidate every live item that was observed under the old source
-   * view, so continuing the old sequence would let delayed patches bridge two histories.
+   * Invalidate the current graph before native history is rebuilt. Keep this writer's epoch
+   * and advance its sequence, so pre-rebuild responses remain older than the new checkpoint.
    */
   #beginSourceReconcile(thread: ThreadState): void {
-    thread.sourceEpoch = randomUUID();
-    thread.sourceSeq = 0;
+    thread.sourceResetSeq = thread.sourceSeq + 1;
     thread.sourceReady = false;
     thread.liveMessages = new Map();
     thread.liveTools = new Map();
@@ -3667,6 +3700,17 @@ export class CodexRuntime implements AgentBackend {
         if (cwd !== thread.cwd || provider !== thread.modelProvider) this.onCatalogChange?.();
         return;
       }
+      case "thread/goal/updated": {
+        try {
+          this.#emit(thread.id, { type: "session.goal", goal: codexGoal(record.goal, thread.id) });
+        } catch (error) {
+          this.#options.log?.(`Codex goal notification 无效：${describeError(error)}`);
+        }
+        return;
+      }
+      case "thread/goal/cleared":
+        this.#emit(thread.id, { type: "session.goal", goal: null });
+        return;
       case "thread/status/changed": {
         const status = object(record.status);
         thread.waitingForApproval = Array.isArray(status.activeFlags)
@@ -4478,7 +4522,8 @@ export class CodexRuntime implements AgentBackend {
       entries: thread.entries,
       sessionId: this.#publicSessionId(thread.id),
       leafId: thread.entries.at(-1)?.entryId ?? null,
-      request,
+      request: request.knownState !== undefined && request.knownState.seq < thread.sourceResetSeq
+        ? { ...request, knownState: undefined } : request,
       source,
       // 条目可能原地替换（长度不变），sourceSeq 是后端自己维护的改写信号。
       revision: thread.sourceSeq,

@@ -81,6 +81,17 @@ export class ClaudeTranscriptProjection {
     const millis = Date.parse(timestamp);
     const at = Number.isSafeInteger(millis) && millis >= 0 ? millis : 0;
     if (row.type === "user") {
+      // Claude persists background completions as user rows, but their origin is
+      // the session task runner. Keep actual user text (including XML) untouched.
+      if (record(row.origin)?.kind === "task-notification" && row.promptSource === "system") {
+        const body = plainText(message.content) ?? "";
+        const status = /<status>([^<]*)<\/status>/u.exec(body)?.[1];
+        const title = status === "completed" ? "后台任务已完成" : status === "failed" ? "后台任务失败"
+          : status === "killed" || status === "cancelled" ? "后台任务已停止" : "后台任务状态已更新";
+        const summary = /<summary>([\s\S]*?)<\/summary>/u.exec(body)?.[1];
+        const command = summary === undefined ? undefined : /^Background command "([\s\S]*)" (?:completed|failed)/u.exec(summary)?.[1];
+        return [messageEntry(uuid, timestamp, { role: "system", content: command ? `${title}：${clip(command)}` : title, timestamp: at })];
+      }
       const summary = row.isCompactSummary === true ? plainText(message.content) : undefined;
       if (summary !== undefined) return [{ entryId: uuid, type: "compaction", timestamp, data: { summary } }];
       const content = message.content;

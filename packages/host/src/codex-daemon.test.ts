@@ -44,6 +44,18 @@ function fakeTransport(): FakeTransportHarness {
 }
 
 describe("CodexAppServer", () => {
+  it("preserves native RPC error codes for unsupported goal methods", async () => {
+    const harness = fakeTransport();
+    const creating = CodexAppServer.create({ transportImpl: async () => harness.transport });
+    await vi.waitFor(() => expect(harness.sent.length).toBe(1));
+    harness.emit(JSON.stringify({ id: 1, result: {} }));
+    const server = await creating;
+    const request = server.request("thread/goal/get", { threadId: "one" });
+    harness.emit(JSON.stringify({ id: 2, error: { code: -32601, message: "Method not found" } }));
+    await expect(request).rejects.toMatchObject({ outcome: "rejected", code: -32601 });
+    await server.stop();
+  });
+
   it("cancels only the requested native read, ignores its late response and preserves notification delivery", async () => {
     const harness = fakeTransport(), notifications: string[] = [];
     const creating = CodexAppServer.create({ transportImpl: async () => harness.transport, onNotification: method => notifications.push(method) });

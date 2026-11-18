@@ -471,6 +471,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun consumeCommandResult(commandId: String) = active()?.consumeCommandResult(commandId)
 
+    fun executeSessionGoal(runtimeId: String, command: SessionGoalCommand): String? =
+        active()?.executeSessionGoal(runtimeId, command)
+
     fun stopRuntime(): String? = active()?.stopRuntime()
     fun cancelQueuedMessage(queueId: String): String? = active()?.cancelQueuedMessage(queueId)
     fun requestChangeSummaries(runtimeId: String, entries: List<String>, turns: List<String>) = active()?.requestChangeSummaries(runtimeId, entries, turns)

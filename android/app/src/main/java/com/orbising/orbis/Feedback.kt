@@ -107,6 +107,7 @@ private val opaqueFeedbackAnnotation = Regex(
 /** SC101: machine-code tokens are diagnostic-only; paths, filenames and readable transport reasons remain intact. */
 internal fun feedbackFailureText(value: String?, fallback: String): String {
     val text = value?.trim()?.takeIf(String::isNotEmpty) ?: return fallback
+    if (text == "session_sync_model_rejected") return L10n.tr("历史消息同步失败，请重试")
     if (text.lowercase(java.util.Locale.ROOT) in opaqueFeedbackCodes) return fallback
     val display = opaqueFeedbackAnnotation.replace(text, "").trim()
     if (display.isEmpty() || opaqueFeedbackToken.containsMatchIn(display)) return fallback

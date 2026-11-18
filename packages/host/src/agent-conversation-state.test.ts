@@ -68,6 +68,22 @@ describe("Host conversation projection", () => {
     expect(model.accept(scope, snapshot("replacement", 0))).toBe(true);
     expect(model.accept(scope, snapshot("e", 999))).toBe(false);
   });
+  it("drops cached pages on a same-writer rebuild and rejects pages from the previous graph", () => {
+    const registry = new AgentStateRegistry(); const model = new AgentConversationState(registry);
+    expect(model.accept(scope, snapshot("e", 1))).toBe(true);
+    const page = { ...snapshot("e", 1), range: "history" as const, checkpoint: undefined, live: undefined };
+    expect(model.accept(scope, page)).toBe(true);
+    expect(model.stats().pages).toBeGreaterThan(0);
+    const unknown: Extract<RuntimeEvent, { type: "session.patch" }> = { type: "session.patch", sessionId: "s",
+      source: { epoch: "e", seq: 2, ready: false }, baseSeq: 1, seq: 2, checkpointId: "reset",
+      head: { leafId: null }, headCompleteness: "unknown", live: { complete: false, turn: null, messages: [], tools: [] } };
+    expect(model.accept(scope, unknown)).toBe(true);
+    expect(model.stats().pages).toBe(0);
+    expect(model.accept(scope, snapshot("e", 3))).toBe(true);
+    expect(model.accept(scope, page)).toBe(false);
+    expect(model.accept(scope, { ...page, source: { epoch: "e", seq: 3, ready: true } })).toBe(true);
+    expect(model.accept(scope, { ...unknown, source: { epoch: "e", seq: 1, ready: false }, baseSeq: 0, seq: 1 })).toBe(false);
+  });
   it("does not publish a partial transaction when a live inventory exceeds budget", () => {
     const registry = new AgentStateRegistry({ maxValueBytes: 400 }); const model = new AgentConversationState(registry);
     const event = snapshot(); event.live!.messages[0]!.message.content = [{ type: "text", text: "x".repeat(800) }];

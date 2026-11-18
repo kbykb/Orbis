@@ -144,6 +144,7 @@ struct ChatHeaderRuntimeFacts: Equatable {
     let executionTurnId: String?
     let compactionPhase: String?
     let backgroundTasks: BackgroundTaskInventory?
+    let goalSupported: Bool?
 
     init(_ runtime: RuntimeSummary) {
         runtimeId = runtime.runtimeId; status = runtime.status; agentKind = runtime.agentKind
@@ -152,6 +153,7 @@ struct ChatHeaderRuntimeFacts: Equatable {
         currentTurnConfigurationSupported = runtime.currentTurnConfigurationSupported
         executionTurnId = runtime.executionTurnId; compactionPhase = runtime.compactionPhase
         backgroundTasks = runtime.backgroundTasks
+        goalSupported = runtime.goalSupported
     }
 
     /// Reuse the shared localized status/model derivation, without retaining the
@@ -162,7 +164,7 @@ struct ChatHeaderRuntimeFacts: Equatable {
             currentTurnConfiguration: currentTurnConfiguration,
             currentTurnConfigurationSupported: currentTurnConfigurationSupported,
             executionTurnId: executionTurnId, compactionPhase: compactionPhase,
-            backgroundTasks: backgroundTasks)
+            backgroundTasks: backgroundTasks, goalSupported: goalSupported)
     }
 }
 

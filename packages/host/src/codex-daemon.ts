@@ -100,7 +100,7 @@ export type CodexReadOptions = { signal?: AbortSignal; maxResponseBytes?: number
 
 /** A lost RPC reply cannot prove whether a native mutation ran. */
 export class CodexRequestError extends Error {
-  constructor(message: string, readonly outcome: "rejected" | "unconfirmed") { super(message); }
+  constructor(message: string, readonly outcome: "rejected" | "unconfirmed", readonly code?: number) { super(message); }
 }
 // Measured transport bytes for object results; avoids serializing a large native result again.
 const responseSizes = new WeakMap<object, number>();
@@ -313,7 +313,9 @@ export class CodexAppServer {
         if (pending.maxResponseBytes !== undefined && responseBytes > pending.maxResponseBytes) {
           pending.reject(new CodexRequestError("codex_response_too_large", "unconfirmed"));
         } else if (message.error !== undefined && message.error !== null) {
-          pending.reject(new CodexRequestError(describeJsonRpcError(message.error), "rejected"));
+          const code = typeof message.error === "object" && "code" in message.error && typeof message.error.code === "number"
+            ? message.error.code : undefined;
+          pending.reject(new CodexRequestError(describeJsonRpcError(message.error), "rejected", code));
         } else {
           if (message.result !== null && typeof message.result === "object") responseSizes.set(message.result, responseBytes);
           pending.resolve(message.result);

@@ -2209,6 +2209,9 @@ internal fun ChatScreen(
             Surface(Modifier.imePadding()) {
                 val feedbackGeometry = LocalFeedbackGeometry.current
                 Column(Modifier.onGloballyPositioned { feedbackGeometry.composerTop = it.boundsInWindow().top }) {
+                    SessionGoalPanel(state, runtimeId,
+                        onCommand = { model.executeSessionGoal(runtimeId, it) },
+                        onConsumeResult = model::consumeCommandResult)
                     runtime?.backgroundTasks?.takeIf { it.visible }?.let { tasks ->
                         androidx.compose.runtime.key(runtimeId, sessionId) { BackgroundTasksPanel(tasks) }
                     }

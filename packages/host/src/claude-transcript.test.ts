@@ -27,6 +27,19 @@ async function tempConfig(): Promise<string> {
 }
 
 describe("ClaudeTranscriptProjection", () => {
+  it("presents native task notifications as status and preserves user-supplied markup", () => {
+    const projection = new ClaudeTranscriptProjection();
+    const notification = '<task-notification><task-id>task</task-id><output-file>/private/tmp/task.output</output-file><status>completed</status><summary>Background command "Record peak metrics" completed (exit code 0)</summary></task-notification>';
+    projection.push(user("notification", null, notification, {
+      origin: { kind: "task-notification", producer: "session-task" }, promptSource: "system", turnOrigin: "task_notification",
+    }));
+    projection.push(user("actual-user", "notification", notification));
+    projection.push(assistant("reply", "actual-user", [{ type: "text", text: "done" }]));
+    expect(projection.entries[0]!.data.message).toMatchObject({ role: "system", content: "后台任务已完成：Record peak metrics" });
+    expect(projection.entries[1]!.data.message).toMatchObject({ role: "user", content: notification });
+    expect(projection.entries.map(row => row.parentId)).toEqual([null, "notification", "actual-user"]);
+  });
+
   it("updates the Host preview after resuming a long transcript and persisting a new reply", async () => {
     const root = await tempConfig();
     const path = join(root, "long.jsonl");

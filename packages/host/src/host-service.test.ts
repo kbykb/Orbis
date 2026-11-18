@@ -4010,6 +4010,66 @@ describe("Codex 虚拟 runtime 接线（spec §7.4 的 M4 验收）", () => {
     });
   });
 
+  it.each([false, true])("routes goal commands and updates through the encrypted device connection (desktop=%s)", async desktopMode => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-goal-route-"));
+    relay = await startRelayLocal(stateDir);
+    const goals = new Map(["one", "two"].map(threadId => [threadId, { threadId, objective: `Goal ${threadId}`,
+      status: "active", tokenBudget: null, tokensUsed: 10, timeUsedSeconds: 3, createdAt: 1, updatedAt: 2 }]));
+    const request = vi.fn(async (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+      if (method === "thread/resume" || method === "thread/read") return { thread: { id: params.threadId, cwd: stateDir, status: { type: "idle" }, turns: [] } };
+      if (method === "thread/loaded/list") return { data: ["one", "two"] };
+      if (method === "config/read") return { config: {} };
+      if (method === "thread/goal/get") return { goal: goals.get(String(params.threadId)) };
+      if (method === "thread/goal/set") {
+        const goal = { ...goals.get(String(params.threadId))!, ...(typeof params.objective === "string" ? { objective: params.objective } : {}),
+          ...(typeof params.status === "string" ? { status: params.status } : {}), updatedAt: 3 };
+        goals.set(goal.threadId, goal); return { goal };
+      }
+      return { data: [] };
+    });
+    const server = { mode: desktopMode ? "desktop" : "owned", request, notify: vi.fn(), stop: vi.fn(async () => {}) } as unknown as CodexAppServer;
+    const runtime = new CodexRuntime({ server, onEvent: () => {}, rolloutRoot: join(stateDir, "rollouts") });
+    if (desktopMode) runtime.seedDesktopThreads(["one", "two"]);
+    const prefix = desktopMode ? "codex-desktop" : "codex";
+    for (const threadId of ["one", "two"]) await runtime.activate({ type: "resume", sessionId: desktopMode ? `${prefix}:${threadId}` : threadId });
+    try {
+      host = await HostService.create({ relayUrl: relay.url, ...relayBusinessHostOptions(relay.url), credential: "runtime-secret", adminToken: "owner-secret",
+        stateDir, sessionsRoot: join(stateDir, "pi-sessions"), reconnect: false, lan: false,
+        ...(desktopMode ? { codexDesktopRuntime: runtime } : { codexRuntime: runtime }) });
+      await host.start(); device = await readyDeviceLocal({ host, relay });
+      const next = async (predicate: (message: Record<string, unknown>) => boolean) => {
+        for (let index = 0; index < 40; index++) {
+          const message = await device!.receiveMessage() as Record<string, unknown>;
+          if (predicate(message)) return message;
+        }
+        throw new Error("Missing goal device response");
+      };
+      const send = (commandId: string, command: unknown) => sendRequest(device!, { type: "runtime.command", protocolVersion: PROTOCOL_VERSION,
+        runtimeId: `${prefix}:one`, commandId, command });
+      send("goal-read", { type: "session.goal.read" });
+      expect(await next(message => (message.event as RuntimeEvent | undefined)?.type === "session.goal")).toMatchObject({
+        type: "runtime.event", runtimeId: `${prefix}:one`, event: { type: "session.goal", goal: goals.get("one") },
+      });
+      expect(request).toHaveBeenCalledWith("thread/goal/get", { threadId: "one" });
+      for (const status of ["paused", "active"]) {
+        send(`goal-${status}`, { type: "session.goal.set", status });
+        expect(await next(message => {
+          const event = message.event as RuntimeEvent | undefined;
+          return event?.type === "command.result" && event.commandId === `goal-${status}` && event.status === "success";
+        })).toMatchObject({ runtimeId: `${prefix}:one`, event: { ok: true } });
+        expect(request).toHaveBeenCalledWith("thread/goal/set", { threadId: "one", status, origin: "user" });
+      }
+      server.onNotification?.("thread/goal/updated", { threadId: "one", turnId: null, goal: { ...goals.get("one"), objective: "Native desktop edit" } });
+      expect(await next(message => {
+        const event = message.event as RuntimeEvent | undefined;
+        return event?.type === "session.goal" && event.goal?.objective === "Native desktop edit";
+      })).toMatchObject({
+        runtimeId: `${prefix}:one`, event: { goal: { threadId: "one", objective: "Native desktop edit" } },
+      });
+      expect(goals.get("two")?.status).toBe("active");
+    } finally { await runtime.stop(); }
+  });
+
   it("slash.execute：未声明的命令回 unsupported_command；已声明但无会话回 command.result 失败", async () => {
     stateDir = await mkdtemp(join(tmpdir(), "orbis-host-"));
     relay = await startRelayLocal(stateDir);

@@ -9,6 +9,8 @@ type Snapshot = Extract<RuntimeEvent, { type: "session.snapshot" }>;
 type Patch = Extract<RuntimeEvent, { type: "session.patch" }>;
 type Current = {
   source: SessionSourceEpoch; retired: Set<string>; head: SessionBranchCursor; live: SessionLiveState;
+  /** Pages from before the latest same-writer rebuild cannot describe the current graph. */
+  rebuildSeq: number;
   entries: RemoteSessionEntry[]; display?: DisplayBatch; timings: RuntimeTurnTiming[]; bytes: number;
 };
 export type ConversationStateOptions = { maxCurrentSessions?: number; maxCurrentBytes?: number; maxPageBytes?: number; maxPages?: number; maxPageCacheBytes?: number };
@@ -138,6 +140,7 @@ export class AgentConversationState {
       if (!old?.source.ready) return reject("range_baseline_required");
       if (!source.ready) return reject("range_source_not_ready");
       if (old.source.epoch !== source.epoch) return reject("range_epoch_mismatch");
+      if (source.seq < old.rebuildSeq) return reject("range_before_source_rebuild");
       if (source.seq > old.source.seq) return reject("range_source_ahead");
       if (bytesOfEvent(event) > this.#limits.maxPageBytes) return reject("page_byte_limit");
       this.#cache(key, event);
@@ -171,13 +174,14 @@ export class AgentConversationState {
       (JSON.stringify(old.head) !== JSON.stringify(head) || JSON.stringify(old.live) !== JSON.stringify(event.live))) return reject("same_seq_state_mismatch");
     const canonical = ready ? this.#canonical(sameEpoch ? old : undefined, event, head!, reject) : { entries: [], timings: [] };
     if (!canonical) return false;
-    let next: Current = { source: { ...source, ready: ready === true }, retired, head: structuredClone(head ?? old?.head ?? { leafId: null }),
+    const rebuildSeq = !source.ready ? source.seq : sameEpoch ? old?.rebuildSeq ?? 0 : 0;
+    let next: Current = { source: { ...source, ready: ready === true }, retired, rebuildSeq, head: structuredClone(head ?? old?.head ?? { leafId: null }),
       live: structuredClone(event.live ?? old?.live ?? { complete: false, turn: null, messages: [], tools: [] }), ...canonical, bytes: 0 };
     next.bytes = bytesOfCurrent(next);
     if (this.#currentBytes - (old?.bytes ?? 0) + next.bytes > this.#limits.maxCurrentBytes) {
       // Retain provenance and last-known registry values; discarded ranges cannot be a baseline.
       ready = false;
-      next = { source: { ...source, ready: false }, retired, head: { leafId: null }, live: { complete: false, turn: null, messages: [], tools: [] }, entries: [], timings: [], bytes: 0 };
+      next = { source: { ...source, ready: false }, retired, rebuildSeq, head: { leafId: null }, live: { complete: false, turn: null, messages: [], tools: [] }, entries: [], timings: [], bytes: 0 };
       next.bytes = bytesOfCurrent(next);
       if (this.#currentBytes - (old?.bytes ?? 0) + next.bytes > this.#limits.maxCurrentBytes) return reject("current_byte_limit");
     }
@@ -235,7 +239,7 @@ export class AgentConversationState {
     const result = this.#registry.commitTransaction([...changes, ...(companion?.changes ?? [])], () => {
       this.#currentBytes += next.bytes - (old?.bytes ?? 0);
       this.#current.set(key, next);
-      if (!sameEpoch) this.#dropPages(key);
+      if (!sameEpoch || !source.ready) this.#dropPages(key);
       if (ready && event.type === "session.snapshot" && bytesOfEvent(event) <= this.#limits.maxPageBytes) this.#cache(key, event);
       companion?.onCommitted();
     });

@@ -147,6 +147,7 @@ struct RuntimeSummary: Codable, Hashable, Identifiable {
     /// Host execution activity; kept separate from the phase used by send/stop logic.
     var compactionPhase: String? = nil
     var backgroundTasks: BackgroundTaskInventory? = nil
+    var goalSupported: Bool? = nil
     var id: String { runtimeId }
     var presentationStatus: String {
         if compactionPhase == "running" && ["idle", "running"].contains(status) { return "compacting" }
@@ -181,6 +182,28 @@ struct RuntimeSummary: Codable, Hashable, Identifiable {
         }
         return commands.contains { $0.name == "quit" && $0.argument?.required != true } ? nil : .unavailableCommand
     }
+}
+
+struct SessionGoal: Codable, Equatable {
+    let threadId: String
+    let objective: String
+    let status: String
+    let tokenBudget: Int64?
+    let tokensUsed: Int64
+    let timeUsedSeconds: Double
+    let createdAt: Double
+    let updatedAt: Double
+    var statusTitle: String {
+        L10n.tr(["active": "进行中", "paused": "已暂停", "blocked": "受阻", "usageLimited": "用量受限",
+                 "budgetLimited": "已达预算", "complete": "已完成"][status] ?? "未知")
+    }
+}
+
+struct SessionGoalState: Equatable {
+    var goal: SessionGoal?
+    var loaded = false
+    var pending = false
+    var error: String?
 }
 
 /// SC82: selection and swipe feedback stay available; only submission uses close admission.
@@ -788,6 +811,7 @@ enum FeedbackText {
         switch value {
         case "agent_unsupported", "对应的 agent 后端未就绪": return L10n.tr("所选助手尚未就绪，请在电脑端检查")
         case "invalid_request": return L10n.tr("操作未完成，请重试")
+        case "session_sync_model_rejected": return L10n.tr("历史消息同步失败，请重试")
         default: break
         }
         if value.range(of: "^[a-z][a-z0-9_:-]*_[a-z0-9_:-]+$", options: .regularExpression) != nil {

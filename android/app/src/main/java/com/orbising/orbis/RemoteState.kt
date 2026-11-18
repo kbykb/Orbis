@@ -116,6 +116,8 @@ data class RuntimeSummary(
     /** Host execution activity; does not change the phase used by send/stop logic. */
     val compactionPhase: String? = null,
     val backgroundTasks: BackgroundTaskInventory? = null,
+    /** Native goal controls explicitly advertised by the Host. */
+    val goalSupported: Boolean = false,
 ) {
     val presentationStatus: String
         get() = when {
@@ -585,6 +587,7 @@ data class RemoteState(
     /** 启动成功后要迁移的草稿：(占位 Runtime, 真实 Runtime)，由 [HostConnection] 写入草稿存储后清除。 */
     val launchDraftMove: Pair<RuntimeSummary, RuntimeSummary>? = null,
     val capabilities: Map<String, RuntimeCapabilities> = emptyMap(),
+    val sessionGoals: Map<String, SessionGoalView> = emptyMap(),
     /**
      * 这台电脑支持的 agent 种类（[device.ready] 的 `agents`）。
      *
@@ -2480,7 +2483,7 @@ class RelayReducer(
             }
         if (sequence <= (state.lastSequence[sequenceKey] ?: -1) && !snapshotStillOwned && eventType != "session.patch") return state
         val supportedEvents = setOf(
-            "runtime.status", "runtime.metadata", "runtime.capabilities", "session.catalog", "message.queued", "session.snapshot", "session.sync.pending", "session.entry.result", "session.patch", "message.started", "message.delta",
+            "runtime.status", "runtime.metadata", "runtime.capabilities", "session.goal", "session.catalog", "message.queued", "session.snapshot", "session.sync.pending", "session.entry.result", "session.patch", "message.started", "message.delta",
             "message.finished", "turn.started", "turn.finished", "tool.started", "tool.updated", "tool.finished", "artifact.started",
             "artifact.failed", "interaction.requested", "interaction.snapshot",
             "interaction.resolved", "interaction.cancelled", "local_interaction.required", "command.result", "runtime.error",
@@ -2491,6 +2494,10 @@ class RelayReducer(
         val conversation = state.conversations[runtimeId] ?: RuntimeConversation()
         if (eventType in MODEL_OWNED_LEGACY_EVENTS) {
             return state.copy(lastSequence = state.lastSequence + (sequenceKey to sequence))
+        }
+        if (eventType == "session.goal") {
+            return state.withSessionGoal(runtimeId, event, json)
+                .copy(lastSequence = state.lastSequence + (sequenceKey to sequence))
         }
         if (conversation.sourceEpoch != null && eventType in setOf(
                 "message.started", "message.delta", "message.finished", "turn.started", "turn.finished",

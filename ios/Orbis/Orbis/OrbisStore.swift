@@ -304,6 +304,8 @@ final class HostConnection: ObservableObject {
     @Published private(set) var queuedMessages: [String: [QueuedMessage]] = [:]
     /// ADR-0049：本机已发出、尚未在源端落地的消息。按 Session 归属，只属于 `pendingSendHostId`。
     @Published private(set) var pendingSends = PendingSendOutbox()
+    @Published private(set) var sessionGoals: [String: SessionGoalState] = [:]
+    private var goalActionIds: Set<String> = []
     private var pendingSendHostId: String?
     /// 每个 Session 应用权威状态（快照或完整 patch）的次数，用于兜底核对。
     private var sessionRevisions: [String: Int] = [:]
@@ -1015,6 +1017,7 @@ final class HostConnection: ObservableObject {
         interactions = [:]; queuedMessages = [:]; interactionOutcomes = [:]
         workingBranches = [:]; dismissPreview()
         actionTimeouts.values.forEach { $0.cancel() }; actionTimeouts = [:]; runtimeActions = [:]; composerActionDrafts = [:]; pendingActionIds = []; setActionFeedback(nil)
+        sessionGoals = [:]; goalActionIds = []
         pathRTT = nil; commands = [:]; supportedAgents = nil; launchableAgents = nil; codexDesktop = nil
         dismissBrowse(); clearActivation()
         clearSyncs()
@@ -2365,6 +2368,25 @@ final class HostConnection: ObservableObject {
         performActionId(runtimeId: runtimeId, name: name, command: command) != nil
     }
 
+    @discardableResult
+    func requestGoal(runtimeId: String, sessionId: String?, objective: String? = nil, status: String? = nil) -> Bool {
+        guard canSend, let runtime = runtimeIndex[runtimeId], runtime.sessionId == sessionId,
+              runtime.goalSupported == true, sessionGoals[runtimeId]?.pending != true else { return false }
+        let writing = objective != nil || status != nil
+        var command: [String: Any] = ["type": writing ? "session.goal.set" : "session.goal.read"]
+        if let objective {
+            let text = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, text.utf16.count <= 100_000 else { return false }
+            command["objective"] = text
+        }
+        if let status { guard ["active", "paused"].contains(status) else { return false }; command["status"] = status }
+        guard let id = performActionId(runtimeId: runtimeId, name: L10n.tr("目标"), command: command) else { return false }
+        goalActionIds.insert(id)
+        var value = sessionGoals[runtimeId] ?? SessionGoalState()
+        value.pending = true; value.error = nil; sessionGoals[runtimeId] = value
+        return true
+    }
+
     private func performActionId(runtimeId: String, name: String, command: [String: Any]) -> String? {
         let id = UUID().uuidString
         objectErrors[runtimeId] = nil
@@ -2388,6 +2410,7 @@ final class HostConnection: ObservableObject {
 
     private func finishAction(_ id: String, succeeded: Bool, message: String? = nil, result: [String: Any]? = nil) {
         guard let action = runtimeActions.removeValue(forKey: id) else { return }
+        let goalAction = goalActionIds.remove(id) != nil
         if let submitted = composerActionDrafts.removeValue(forKey: id), succeeded {
             updateDrafts(reload: true) { if $0[submitted.key] == submitted.text { $0[submitted.key] = nil } }
         }
@@ -2395,6 +2418,13 @@ final class HostConnection: ObservableObject {
         pendingActionIds.remove(id); actionTimeouts.removeValue(forKey: id)?.cancel(); updateSyncing()
         guard let current = runtimeIndex[action.runtimeId], current.sessionId == action.sessionId else {
             recordConnectionEvent("action.result_dropped: owner_replaced"); return
+        }
+        if goalAction {
+            var value = sessionGoals[action.runtimeId] ?? SessionGoalState()
+            value.pending = false
+            value.error = succeeded ? nil : FeedbackText.reason(message ?? L10n.tr("目标操作未确认，请重新读取"))
+            sessionGoals[action.runtimeId] = value
+            return
         }
         if succeeded {
             setActionFeedback(L10n.tr("{0} 已完成", action.name), key: "action:" + id)
@@ -3208,6 +3238,17 @@ final class HostConnection: ObservableObject {
         if type.hasPrefix("session.changes.") || type.hasPrefix("session.change.detail.") { return }
         toolContent.consume(event, runtimeId: runtimeId)
         toolInventories.consume(event, runtime: runtimeId)
+        if type == "session.goal", let runtime = runtimeIndex[runtimeId] {
+            var value = sessionGoals[runtimeId] ?? SessionGoalState()
+            if event["goal"] is NSNull { value.goal = nil }
+            else {
+                guard let raw = event["goal"] as? [String: Any], let goal: SessionGoal = jsonDecode(raw),
+                      runtime.sessionId == goal.threadId || runtime.sessionId == "codex-desktop:" + goal.threadId else { return }
+                value.goal = goal
+            }
+            value.loaded = true; value.error = nil; sessionGoals[runtimeId] = value
+            return
+        }
         let modelOwnedDomain: String? = ["runtime.status": "execution", "runtime.capabilities": "capabilities", "interaction.requested": "interactions", "interaction.snapshot": "interactions", "interaction.resolved": "interactions", "interaction.cancelled": "interactions", "queue.snapshot": "delivery", "queue.updated": "delivery", "message.queued": "delivery", "delivery.snapshot": "delivery"][type]
         if let domain = modelOwnedDomain, agentState.owns(domain, runtimeId: runtimeId) { return }
         if type == "message.queued", let item: QueuedMessage = jsonDecode(event) {
@@ -3899,6 +3940,7 @@ final class HostConnection: ObservableObject {
 
     private func invalidateConversation(_ runtimeId: String) {
         configFailures.removeValue(forKey: runtimeId)
+        sessionGoals[runtimeId] = nil
         for setting in OperationKinds.configSettings { configSelections.removeValue(forKey: OperationKinds.configTarget(runtimeId: runtimeId, setting: setting)) }
         if runtimeId == selectedRuntimeId { turnFileChanges.clear() }
         historyWriteLeases.removeValue(forKey: runtimeId)?.invalidate()
@@ -3919,7 +3961,7 @@ final class HostConnection: ObservableObject {
         interactions[runtimeId] = nil; commands[runtimeId] = nil; workingBranches[runtimeId] = nil
         if entryPreview?.runtimeId == runtimeId { dismissPreview() }
         let actions = runtimeActions.filter { $0.value.runtimeId == runtimeId }.map(\.key)
-        for id in actions { runtimeActions[id] = nil; composerActionDrafts[id] = nil; pendingActionIds.remove(id); actionTimeouts.removeValue(forKey: id)?.cancel() }
+        for id in actions { runtimeActions[id] = nil; goalActionIds.remove(id); composerActionDrafts[id] = nil; pendingActionIds.remove(id); actionTimeouts.removeValue(forKey: id)?.cancel() }
         conversations[runtimeId] = nil
         liveMessageIds[runtimeId] = nil; unfinishedLiveMessageIds[runtimeId] = nil; liveOrders[runtimeId] = nil; liveToolReferences[runtimeId] = nil; liveTools[runtimeId] = nil
         displayMessageIds[runtimeId] = nil; messageAliases[runtimeId] = nil
