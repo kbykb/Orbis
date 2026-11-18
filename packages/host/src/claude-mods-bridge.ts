@@ -21,7 +21,7 @@ import {
 import { mergeAgentTaskInventory } from "./agent-tasks.js";
 import type { ClaudeQuestionAnswer, ClaudeRacedQuestion } from "./claude-hook-bridge.js";
 import { ClaudeSessionHistory } from "./claude-session-history.js";
-import { claudeConfigDir, type ClaudeTranscriptFacts } from "./claude-transcript.js";
+import { claudeConfigDir, claudeToolDescription, claudeToolDescriptionId, type ClaudeTranscriptFacts } from "./claude-transcript.js";
 import { localHostname } from "./sessions.js";
 import { LocalClaudeProcessControl, type ClaudeProcessControl, type ClaudeProcessIdentity } from "./claude-process.js";
 import { CLAUDE_MIN_VERSION, supportsClaudeMods } from "./claude-version.js";
@@ -449,7 +449,10 @@ export class ClaudeModsBridge {
     }
     if (parsed.type === "session.append") {
       session.activeTurn?.announced.push(parsed.uuid);
-      void session.history.refresh().catch(() => undefined);
+      // A restarted Host can miss turn.start, and native append can precede the
+      // file flush. Wait for this exact row without retiring any newer live step.
+      void (session.activeTurn === undefined ? session.history.settleTurn([parsed.uuid], [])
+        : session.history.refresh()).catch(() => undefined);
       return "accepted";
     }
     if (parsed.type === "session.state") {
@@ -498,7 +501,7 @@ export class ClaudeModsBridge {
       this.#status(runtimeId, "running");
     } else if (parsed.type === "turn.complete") {
       // A completion from an older native turn cannot finish or clear the current one.
-      if (session.activeTurn?.turnId !== parsed.turnId) return "accepted";
+      if (session.activeTurn !== undefined && session.activeTurn.turnId !== parsed.turnId) return "accepted";
       const stopCommandId = session.pendingStopId;
       delete session.pendingStopId;
       this.#status(runtimeId, "idle");
@@ -546,7 +549,7 @@ export class ClaudeModsBridge {
           const anchor = session.history.turnAnchor(announced);
           if (anchor) this.#options.onFileChangeAnchor?.(runtimeId, parsed.turnId, anchor);
         }).catch(() => undefined);
-      }
+      } else void session.history.refresh().catch(() => undefined);
       delete session.activeTurn;
       session.state.currentTurnConfiguration = null;
       this.#publishMetadata(runtimeId, session);
@@ -891,8 +894,10 @@ function normalizeNativeEvent(native: ClaudeModsNativeEvent, session: Session): 
       return events;
     }
     case "turn.complete": {
-      const startedAt = session.activeTurn?.startedAt ?? Date.now();
       const active = session.activeTurn?.turnId === native.turnId ? session.activeTurn : undefined;
+      // Reconnecting after a Host restart does not recover the native start time.
+      if (active === undefined) return [];
+      const startedAt = active.startedAt;
       const events: RuntimeEvent[] = [];
       // Streamed messages stay live until the transcript rows of this turn replace them.
       for (const [messageId, live] of active?.messages ?? []) events.push(finishedMessage(messageId, live));
@@ -903,7 +908,14 @@ function normalizeNativeEvent(native: ClaudeModsNativeEvent, session: Session): 
         ...(native.turnIndex === undefined ? {} : { turnIndex: native.turnIndex }) });
       return events;
     }
-    case "tool.started": return [{ type: "tool.started", toolCallId: native.toolCallId, toolName: native.toolName, arguments: native.arguments }];
+    case "tool.started": {
+      const description = claudeToolDescription(native.toolName, native.arguments);
+      return [
+        ...(description === undefined ? [] : [{ type: "message.finished" as const,
+          message: messageOf(claudeToolDescriptionId(native.toolCallId), "system", [{ type: "text", text: description }]) }]),
+        { type: "tool.started", toolCallId: native.toolCallId, toolName: native.toolName, arguments: native.arguments },
+      ];
+    }
     case "tool.finished": return [{ type: "tool.finished", toolCallId: native.toolCallId, toolName: native.toolName, result: native.result, isError: native.isError === true }];
     case "command.result": return [{ type: "command.result", commandId: native.commandId, ok: native.ok, ...(native.status === undefined ? {} : { status: native.status }), ...(native.error === undefined ? {} : { error: native.error }), ...(native.result === undefined ? {} : { result: native.result }) }];
   }

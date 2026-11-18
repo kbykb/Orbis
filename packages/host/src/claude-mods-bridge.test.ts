@@ -345,6 +345,50 @@ describe("ClaudeModsBridge", () => {
     await expect(bridge.sync(current.runtimeId, request)).resolves.toMatchObject({ type: "session.snapshot", sessionId: "session-1", syncId: "sync-1", entries: [] });
   });
 
+  it("recovers a reply flushed after an append when the Host missed the turn start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orbis-claude-recovered-end-"));
+    const path = join(root, "session.jsonl");
+    const patches: Extract<RuntimeEvent, { type: "session.patch" }>[] = [];
+    const finished = vi.fn();
+    let history!: ClaudeSessionHistory;
+    const bridge = bridgeWith({
+      onEvent: (_id, event) => { if (event.type === "session.patch") patches.push(event); },
+      onTurnFinished: finished,
+      createHistory: (id, config, publish) => history = new ClaudeSessionHistory(id, config, publish,
+        { locate: async () => path, settleTimeoutMs: 1_000, settleIntervalMs: 10 }),
+    });
+    try {
+      await writeFile(path, "");
+      const current = online(bridge);
+      await history.refresh();
+      const refresh = vi.spyOn(history, "refresh");
+      const emit = (event: unknown) => expect(bridge.receiveEvent(current.runtimeId, current.generation, event)).toBe("accepted");
+      // A restarted Host sees the native append/completion without the earlier start.
+      emit({ type: "session.append", uuid: "late-answer", door: "response" });
+      await refresh.mock.results[0]!.value;
+      expect(history.hasEntry("late-answer")).toBe(false);
+      emit({ type: "turn.complete", turnId: "missed-start", reason: "answer", durationMs: 500 });
+      if (refresh.mock.results.length > 1) await refresh.mock.results.at(-1)!.value;
+      expect(history.source.snapshot().live.turn).toBeNull();
+      expect(bridge.statusOf(current.runtimeId)).toBe("idle");
+      emit({ type: "turn.complete", turnId: "missed-start", reason: "answer" });
+      // Waiting for the old bytes must not retire live output of a newer turn.
+      emit({ type: "turn.start", turnId: "next", startedAt: 20 });
+      emit({ type: "turn.step.chunks", turnId: "next", stepIndex: 0,
+        chunks: [{ blockIndex: 0, contentType: "text", delta: "new response" }] });
+      await appendFile(path, JSON.stringify({ type: "assistant", uuid: "late-answer", parentUuid: null,
+        message: { role: "assistant", content: [{ type: "text", text: "完整正文" }] } }) + "\n");
+      // No extra sync or user message is allowed to trigger this recovery.
+      await vi.waitFor(() => expect(patches.some(patch => patch.entries?.some(entry => entry.entryId === "late-answer"))).toBe(true));
+      expect(finished).toHaveBeenCalledOnce();
+      expect(history.source.entry("late-answer")?.data.message).toMatchObject({ content: [{ type: "text", text: "完整正文" }] });
+      expect(history.source.snapshot().live.messages).toMatchObject([{ message: { messageId: "next:0",
+        content: [{ type: "text", text: "new response" }] } }]);
+      expect(history.source.snapshot().live.turn).toMatchObject({ turnId: "next", startedAt: 20 });
+      expect(bridge.statusOf(current.runtimeId)).toBe("running");
+    } finally { bridge.close(); await rm(root, { recursive: true, force: true }); }
+  });
+
   // FT-G12-DETAIL-01: the on-demand native reader must survive a truncated history projection.
   it("reads the complete Claude reply independently of the wire preview", async () => {
     const root = await mkdtemp(join(tmpdir(), "orbis-claude-full-entry-")), path = join(root, "session.jsonl");

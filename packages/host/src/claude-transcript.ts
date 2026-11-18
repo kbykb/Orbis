@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { RemoteSessionEntry } from "@orbis/protocol";
+import { toolSummaryText, type RemoteSessionEntry } from "@orbis/protocol";
 
 /**
  * Claude Code's native transcript (`<config>/projects/<project>/<sessionId>.jsonl`) is the
@@ -121,6 +121,7 @@ export class ClaudeTranscriptProjection {
     }
     if (row.type === "assistant") {
       if (!Array.isArray(message.content)) return [];
+      const descriptions: Omit<RemoteSessionEntry, "parentId">[] = [];
       const blocks = message.content.flatMap((block): Record<string, unknown>[] => {
         const item = record(block);
         if (item?.type === "text" && typeof item.text === "string" && item.text.length > 0) return [{ type: "text", text: item.text }];
@@ -134,17 +135,30 @@ export class ClaudeTranscriptProjection {
         }
         if (item?.type === "tool_use" && typeof item.id === "string" && typeof item.name === "string") {
           this.#toolNames.set(item.id, item.name);
+          const description = claudeToolDescription(item.name, item.input);
+          if (description !== undefined) descriptions.push(messageEntry(claudeToolDescriptionId(item.id), timestamp,
+            { role: "system", content: description, timestamp: at }));
           return [{ type: "toolCall", id: item.id, name: item.name, arguments: item.input ?? {} }];
         }
         return [];
       });
       if (blocks.length === 0) return [];
       const model = text(message.model);
-      return [messageEntry(uuid, timestamp, { role: "assistant", content: blocks, timestamp: at, ...(model === undefined ? {} : { model }) })];
+      return [...descriptions, messageEntry(uuid, timestamp, { role: "assistant", content: blocks, timestamp: at, ...(model === undefined ? {} : { model }) })];
     }
     return [];
   }
 }
+
+/** The native Bash caption, independent of command bodies and model thinking. */
+export function claudeToolDescription(name: string, input: unknown): string | undefined {
+  const description = name === "Bash" ? record(input)?.description : undefined;
+  return typeof description === "string" && description.trim().length > 0
+    ? toolSummaryText(description.trim()).text : undefined;
+}
+
+/** Both the live tool event and its persisted transcript use the native call id. */
+export function claudeToolDescriptionId(toolCallId: string): string { return `claude-tool-description:${toolCallId}`; }
 
 /**
  * Reads appended transcript bytes. A shrunk or replaced file restarts the projection;
