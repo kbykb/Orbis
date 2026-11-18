@@ -99,18 +99,17 @@ export const register: Register = on => {
     // while its streaming twin is still live. The UUID is pinned by the public append contract.
     if (step?.target !== undefined) {
       const reservation = { type: "turn.step.row", turnId: step.turnId, stepIndex: step.stepIndex, uuid: event.uuid } as const;
-      let reserved = await postEvent($, step.target, reservation);
-      if (!reserved && connection === step.target) {
+      const target = step.target;
+      let reserved = await postEvent($, target, reservation);
+      if (!reserved) {
         // Reconnect before storage is announced; an unacknowledged reservation cannot safely
-        // share a generation with the canonical append. Keep old-step chunks on their target.
-        connection = undefined;
+        // share a generation with the canonical append. A fresh Host detaches the old stream;
+        // only a retained source can acknowledge this step's UUID under its renewed generation.
+        if (connection === target) connection = undefined;
         const replacement = await connect($);
-        if (replacement !== undefined) {
-          step.target = replacement;
-          reserved = await postEvent($, replacement, reservation);
-        }
+        if (replacement !== undefined && step.target === replacement) reserved = await postEvent($, replacement, reservation);
       }
-      if (!reserved) throw new Error("Orbis Host 未确认 Claude 步骤身份，已阻止无身份交接。");
+      if (!reserved && step.target !== undefined) throw new Error("Orbis Host 未确认 Claude 步骤身份，已阻止无身份交接。");
     }
     const stored = await next(event);
     if (!("message" in stored) || stored.message === undefined || stored.uuid === undefined) return stored;
@@ -472,8 +471,11 @@ async function connectOnce($: Api): Promise<Connection | undefined> {
   connection = next;
   // Only an explicit Host acknowledgement can transfer an in-flight native step. A different
   // Session or a fresh Host must not receive old-generation chunks or command results.
-  if (response.body.resumed === true && activeStep?.target?.sessionId === sessionId
-    && activeStep.target.runtimeId === next.runtimeId) activeStep.target = next;
+  if (activeStep?.target?.sessionId === sessionId && activeStep.target.runtimeId === next.runtimeId) {
+    // A fresh Host has no live twin to hand off. Leave its canonical append capture enabled
+    // without forwarding the old source's remaining chunks, step finish or reservations.
+    activeStep.target = response.body.resumed === true ? next : undefined;
+  }
   void reportState($, true);
   return next;
 }

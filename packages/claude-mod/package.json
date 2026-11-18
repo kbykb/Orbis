@@ -1,6 +1,6 @@
 {
   "name": "@orbis/claude-code-mod",
-  "version": "0.1.15-local.20261118",
+  "version": "0.1.16-local.20261119",
   "private": true,
   "type": "module",
   "description": "Claude Code Mods bridge for the Orbis Host"

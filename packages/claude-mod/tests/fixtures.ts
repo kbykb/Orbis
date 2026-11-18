@@ -28,6 +28,8 @@ export function setup(on: On, options: { home?: string } = {}) {
     reachable: true,
     generation: "first-generation",
     resumed: false,
+    reservationError: "",
+    reservationFailures: 0,
     rejection: "",
     pollError: "",
     commands: [] as { commandId: string; command: { type: "user_message"; text: string; delivery?: "steer" | "followUp" } | { type: "stop" } | { type: "slash"; name: string; args: string } }[],
@@ -110,6 +112,10 @@ export function setup(on: On, options: { home?: string } = {}) {
     if (event.url.endsWith("/poll")) return world.pollError
       ? reply(world.pollError === "unauthorized" ? 401 : 409, { ok: false, error: world.pollError })
       : reply(200, { ok: true, commands: world.commands, ...(world.questionAnswers.length > 0 ? { questionAnswers: world.questionAnswers } : {}) });
+    if ((body.event as { type?: string } | undefined)?.type === "turn.step.row" && world.reservationFailures > 0) {
+      world.reservationFailures--;
+      return reply(409, { result: world.reservationError });
+    }
     if ((body.event as { type?: string } | undefined)?.type === "question.requested" && world.questionRefused) {
       return reply(400, { result: "invalid" });
     }

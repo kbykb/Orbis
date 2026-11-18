@@ -94,6 +94,97 @@ test("rebinds a streaming step only when the Host acknowledges its retained sour
     && (request.body.event as { type?: string })?.type === "turn.step.finished")).toBe(true);
 });
 
+test("detaches an in-flight stream after a fresh Host hello and captures the native body", async ($, on) => {
+  const { clock, world } = setup(on);
+  const session = mock.session(on);
+  on("turn.step", async function* (_$, event) {
+    yield { kind: "text", index: 0, text: "p".repeat(800) };
+    world.pollError = "stale_generation";
+    await clock.advance(750);
+    world.pollError = "";
+    world.generation = "fresh-generation";
+    await clock.advance(750);
+    await $.session.append({ door: "response", uuid: "native-body", origin: { kind: "model", model: "test" },
+      message: { type: "assistant", role: "assistant", content: [{ type: "text", text: "final body" }] } });
+    yield { kind: "text", index: 0, text: " suffix" };
+    return { turnId: event.turnId, index: event.index, answer: "final body", toolUses: [], stopReason: "end_turn", usage: null };
+  });
+  await $.session.start({ cwd: "/workspace", surface: "terminal", isInteractive: true });
+  await clock.settle();
+  await $.turn.start({ text: "task", turnId: "main" });
+  const stream = $.turn.step({ turnId: "main", index: 0, model: "test", messageCount: 1 });
+  for await (const chunk of stream) expect(chunk.kind).toBe("text");
+  await stream.result;
+  await $.turn.complete({ turnId: "main", answer: "final body", durationMs: 1, reason: "answer", isAborted: false });
+  expect(session.appended().map(row => row.uuid)).toEqual(["native-body"]);
+  const fresh = world.requests.filter(request => request.body.generation === "fresh-generation")
+    .flatMap(request => request.body.event ? [request.body.event as Record<string, unknown>] : []);
+  expect(fresh).toContainEqual({ type: "session.append", uuid: "native-body", door: "response" });
+  expect(fresh.some(event => ["turn.start", "turn.step.row", "turn.step.chunks", "turn.step.finished"].includes(String(event.type)))).toBe(false);
+});
+
+for (const error of ["stale", "offline"]) {
+  for (const resumed of [false, true]) {
+    test(`recovers a response reservation rejected as ${error} with a ${resumed ? "retained" : "fresh"} source`, async ($, on) => {
+      const { clock, world, hellos } = setup(on);
+      const session = mock.session(on);
+      on("turn.step", async function* (_$, event) {
+        yield { kind: "text", index: 0, text: "p".repeat(800) };
+        world.generation = "renewed-generation";
+        world.resumed = resumed;
+        world.reservationError = error;
+        world.reservationFailures = 1;
+        await $.session.append({ door: "response", uuid: "native-body", origin: { kind: "model", model: "test" },
+          message: { type: "assistant", role: "assistant", content: [{ type: "text", text: "final body" }] } });
+        yield { kind: "text", index: 0, text: " suffix" };
+        return { turnId: event.turnId, index: event.index, answer: "final body", toolUses: [], stopReason: "end_turn", usage: null };
+      });
+      await $.session.start({ cwd: "/workspace", surface: "terminal", isInteractive: true });
+      await clock.settle();
+      await $.turn.start({ text: "task", turnId: "main" });
+      const stream = $.turn.step({ turnId: "main", index: 0, model: "test", messageCount: 1 });
+      for await (const chunk of stream) expect(chunk.kind).toBe("text");
+      await stream.result;
+      await $.turn.complete({ turnId: "main", answer: "final body", durationMs: 1, reason: "answer", isAborted: false });
+      expect(hellos()).toHaveLength(2);
+      expect(session.appended().map(row => row.uuid)).toEqual(["native-body"]);
+      const reservations = world.requests.filter(request => (request.body.event as { type?: string })?.type === "turn.step.row");
+      expect(reservations.map(request => request.body.generation)).toEqual(resumed
+        ? ["first-generation", "renewed-generation"] : ["first-generation"]);
+      const renewed = world.requests.filter(request => request.body.generation === "renewed-generation")
+        .flatMap(request => request.body.event ? [request.body.event as Record<string, unknown>] : []);
+      expect(renewed).toContainEqual({ type: "session.append", uuid: "native-body", door: "response" });
+      expect(renewed.some(event => event.type === "turn.step.chunks")).toBe(resumed);
+      expect(renewed.some(event => event.type === "turn.step.finished")).toBe(resumed);
+      expect(renewed.some(event => event.type === "turn.start")).toBe(false);
+    });
+  }
+}
+
+test("keeps a failed reservation fenced until a Host explicitly confirms recovery", async ($, on) => {
+  const { clock, world } = setup(on);
+  mock.session(on);
+  on("turn.step", async function* (_$, event) {
+    yield { kind: "text", index: 0, text: "prefix" };
+    return { turnId: event.turnId, index: event.index, answer: "final body", toolUses: [], stopReason: "end_turn", usage: null };
+  });
+  await $.session.start({ cwd: "/workspace", surface: "terminal", isInteractive: true });
+  await clock.settle();
+  await $.turn.start({ text: "task", turnId: "main" });
+  const stream = $.turn.step({ turnId: "main", index: 0, model: "test", messageCount: 1 });
+  for await (const chunk of stream) expect(chunk.kind).toBe("text");
+  await stream.result;
+  world.reservationError = "offline";
+  world.reservationFailures = 1;
+  world.rejection = "bridge_offline";
+  // Native core skips a throwing plugin and still keeps its own row. The bridge must not
+  // announce that row as acknowledged when neither the reservation nor re-hello succeeded.
+  await $.session.append({ door: "response", uuid: "unconfirmed-body", origin: { kind: "model", model: "test" },
+    message: { type: "assistant", role: "assistant", content: [{ type: "text", text: "final body" }] } });
+  expect(world.requests.some(request => (request.body.event as { type?: string; uuid?: string })?.type === "session.append"
+    && (request.body.event as { uuid?: string }).uuid === "unconfirmed-body")).toBe(false);
+});
+
 test("scopes a refused hello's backoff to that Host endpoint and token", async ($, on) => {
   const { clock, world, hellos } = setup(on);
   world.rejection = "missing_capability:test";
