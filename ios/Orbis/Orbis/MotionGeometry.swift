@@ -559,9 +559,11 @@ struct SessionShellGeometry: Equatable {
     var showsDirectory: Bool { directory.width > 0 }
 
     init(size: CGSize, divisionFrame: CGRect?, hasHost: Bool, compactHeight: Bool,
-         partiallyOpen: Bool, hasHinge: Bool = false) {
+         partiallyOpen: Bool, hasHinge: Bool = false, fullWidthContent: Bool = false) {
         let division = divisionFrame ?? (hasHinge ? CGRect.zero : nil)
-        let showsDirectory = showsPersistentSessionDirectory(hasHost: hasHost, containerSize: size,
+        // A phone conversation uses the whole inner canvas in either orientation;
+        // its directory remains available as a dismissible overlay.
+        let showsDirectory = !fullWidthContent && showsPersistentSessionDirectory(hasHost: hasHost, containerSize: size,
             divisionFrame: division, compactHeight: compactHeight)
         let directoryEnd: CGFloat
         let contentStart: CGFloat

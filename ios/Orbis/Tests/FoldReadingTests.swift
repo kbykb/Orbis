@@ -4,6 +4,19 @@ import Testing
 @testable import OrbisCore
 
 struct FoldReadingTests {
+    @Test func phoneConversationKeepsFullWidthAcrossRotationAndLateHingeUpdates() {
+        for size in [CGSize(width: 669, height: 951), CGSize(width: 951, height: 669), CGSize(width: 678, height: 466)] {
+            for compactHeight in [true, false] {
+                for division: CGRect? in [nil, .zero, CGRect(x: 475, y: 0, width: 1, height: 669)] {
+                    let layout = SessionShellGeometry(size: size, divisionFrame: division, hasHost: true,
+                        compactHeight: compactHeight, partiallyOpen: false, hasHinge: true, fullWidthContent: true)
+                    #expect(!layout.showsDirectory)
+                    #expect(layout.content == CGRect(origin: .zero, size: size))
+                }
+            }
+        }
+    }
+
     // FOLD-04/07: only a horizontal hinge enables upper reading/lower grip;
     // partial and full landscape postures share the same directory and page frames.
     @Test func postureSeparatesGripReadingFromOrdinaryWideLayouts() {

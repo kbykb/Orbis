@@ -332,6 +332,108 @@ final class OrbisUITests: XCTestCase {
         capture("iphone-duo-expanded-portrait", app: app)
     }
 
+    func testIPhoneDuoConversationUsesFullWidthAndKeepsDirectoryOptionalAfterRotation() {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch("home", arguments: ["--preview-reduce-motion", "--preview-reset-design"])
+        let window = app.windows.firstMatch
+        let directory = app.descendants(matching: .any)["persistent-session-directory"].firstMatch
+        let card = app.buttons["home-runtime-preview-codex"]
+        XCTAssertTrue(card.waitForExistence(timeout: 8))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = window.frame
+            return frame.width > frame.height
+        }, object: nil)
+        guard XCTWaiter.wait(for: [landscape], timeout: 5) == .completed else {
+            XCTFail("Duo must be expanded and able to rotate to landscape before this case can run")
+            return
+        }
+        guard window.frame.height > 600 else {
+            XCTFail("Run on Duo's expanded inner canvas; the cover screen does not exercise the persistent directory")
+            return
+        }
+        XCTAssertTrue(directory.waitForExistence(timeout: 5))
+        card.tap()
+        let composer = app.descendants(matching: .any)["chat-composer"].firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(directory.waitForNonExistence(timeout: 5))
+        XCTAssertGreaterThan(composer.frame.width, window.frame.width * 0.7)
+
+        app.buttons["chat-session-directory"].tap()
+        let drawer = app.descendants(matching: .any)["drawer-session-list"].firstMatch
+        XCTAssertTrue(drawer.waitForExistence(timeout: 4))
+        app.buttons["关闭会话目录"].tap()
+        XCTAssertTrue(drawer.waitForNonExistence(timeout: 4))
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            XCUIDevice.shared.orientation = orientation
+            let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let frame = window.frame
+                return orientation == .portrait ? frame.height > frame.width : frame.width > frame.height
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
+            XCTAssertTrue(composer.isHittable)
+            XCTAssertFalse(directory.exists)
+            XCTAssertTrue(app.buttons["chat-session-directory"].isHittable)
+        }
+        XCTAssertGreaterThan(composer.frame.width, window.frame.width * 0.7)
+        capture("iphone-duo-full-width-conversation", app: app)
+    }
+
+    func testIPhoneConversationUsesFullWidthAndDirectoryRemainsReachableAcrossRotation() {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch("chat", arguments: ["--preview-reduce-motion", "--preview-reset-design"])
+        let window = app.windows.firstMatch
+        let composer = app.descendants(matching: .any)["chat-composer"].firstMatch
+        let directory = app.descendants(matching: .any)["persistent-session-directory"].firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = window.frame
+            return frame.width > frame.height
+        }, object: nil)
+        guard XCTWaiter.wait(for: [landscape], timeout: 5) == .completed else {
+            XCTFail("Phone must rotate to landscape before the full-width checks can run")
+            return
+        }
+        XCTAssertFalse(directory.exists)
+        // The compact-height phone also reserves its landscape safe area and
+        // the attachment/send controls outside the editor itself.
+        XCTAssertGreaterThan(composer.frame.width, window.frame.width * 0.6)
+        app.buttons["chat-session-directory"].tap()
+        let drawer = app.descendants(matching: .any)["drawer-session-list"].firstMatch
+        XCTAssertTrue(drawer.waitForExistence(timeout: 4))
+        app.buttons["关闭会话目录"].tap()
+        XCTAssertTrue(drawer.waitForNonExistence(timeout: 4))
+        capture("iphone-full-width-landscape-conversation", app: app)
+
+        XCUIDevice.shared.orientation = .portrait
+        let portrait = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let frame = window.frame
+            return frame.height > frame.width
+        }, object: nil)
+        guard XCTWaiter.wait(for: [portrait], timeout: 5) == .completed else {
+            XCTFail("Phone must rotate back to portrait before navigation checks can run")
+            return
+        }
+        // Hit the rendered editor and verify actual keyboard input rather than
+        // using XCTest's accessibility-only hittable query after rotation.
+        composer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.typeText("rotation draft")
+        XCTAssertEqual(composer.value as? String, "rotation draft")
+        capture("iphone-portrait-rotation-entered-draft", app: app)
+        XCTAssertFalse(directory.exists)
+        XCTAssertFalse(app.buttons["chat-session-directory"].exists)
+        app.buttons["返回"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["home-new-session"].waitForExistence(timeout: 4))
+        app.buttons["打开会话目录"].tap()
+        XCTAssertTrue(drawer.waitForExistence(timeout: 4))
+        app.buttons["关闭会话目录"].tap()
+        XCTAssertTrue(drawer.waitForNonExistence(timeout: 4))
+        capture("iphone-portrait-conversation-directory-navigation", app: app)
+    }
+
     // FOLD-07: synthetic posture keeps this independent of the simulator hinge
     // menu. Run on the inner Duo canvas; landscape must retain both side panes.
     func testIPhoneDuoPartialLandscapeKeepsDirectoryAndDraftOnRight() {

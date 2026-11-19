@@ -118,7 +118,8 @@ struct ChatView: View {
                     .accessibilityHidden(!controlsVisible)
             }
             .clipped()
-        }.frame(maxWidth: 720).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: UIDevice.current.userInterfaceIdiom == .phone ? .infinity : 720)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .modifier(ChatComposerFocusRegion(focus: composerFocus, actions: actions))
             .background(OrbisPalette(scheme).base.ignoresSafeArea()).tint(accent).environment(\.orbisAccent, accent)
             .downloadFlightHost(downloadFlight).messageSendFlightHost(sendFlight)

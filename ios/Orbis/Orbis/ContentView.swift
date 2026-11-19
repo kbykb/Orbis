@@ -87,7 +87,8 @@ private struct NavigationRoot: View, Equatable {
                     rootPages
                 } page: { page in
                     pageView(page)
-                        .frame(maxWidth: 720).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: page == .chat && UIDevice.current.userInterfaceIdiom == .phone ? .infinity : 720)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .foregroundStyle(OrbisPalette(scheme).text)
                         .background(OrbisPalette(scheme).base.ignoresSafeArea())
                 }
@@ -109,6 +110,7 @@ private struct NavigationRoot: View, Equatable {
         .animation(reduceMotion ? nil : InteractionMotion.panel, value: visualStyle)
         .modifier(SessionDrawerModifier(isOpen: $drawerOpen,
                                         hasHost: !facts.pairings.isEmpty,
+                                        fullWidthContent: navigation.pages.last == .chat && UIDevice.current.userInterfaceIdiom == .phone,
                                         edgeSwipeEnabled: navigation.pages.isEmpty && rootTab == .chat && !facts.pairings.isEmpty && !facts.pairing,
                                         onPersistentChange: { persistentDirectory = $0 },
                                         onClosedChange: { foldClosed = $0 }) {
@@ -595,6 +597,7 @@ private struct SessionDrawerModifier<Drawer: View>: ViewModifier {
     @Environment(\.orbisReduceMotion) private var reduceMotion
     @Binding var isOpen: Bool
     let hasHost: Bool
+    let fullWidthContent: Bool
     let edgeSwipeEnabled: Bool
     var onPersistentChange: (Bool) -> Void = { _ in }
     var onClosedChange: (Bool) -> Void = { _ in }
@@ -620,7 +623,7 @@ private struct SessionDrawerModifier<Drawer: View>: ViewModifier {
         GeometryReader { geometry in
             let layout = SessionShellGeometry(size: geometry.size, divisionFrame: drawerDivision(geometry),
                 hasHost: hasHost, compactHeight: verticalSizeClass == .compact,
-                partiallyOpen: isPartiallyOpen, hasHinge: hasHinge)
+                partiallyOpen: isPartiallyOpen, hasHinge: hasHinge, fullWidthContent: fullWidthContent)
             let width = min(320, geometry.size.width * 0.85)
             ordinaryContent(content, layout: layout, containerWidth: geometry.size.width, drawerWidth: width)
                 .overlay { drawerOverlay(persistent: layout.showsDirectory, width: width, containerWidth: geometry.size.width) }

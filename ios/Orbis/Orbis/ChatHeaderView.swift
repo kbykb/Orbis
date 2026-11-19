@@ -90,6 +90,8 @@ struct ChatHeaderView: View, Equatable {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.orbisFoldReading) private var foldReading
     @Environment(\.orbisOpenSessionDirectory) private var openDirectory
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     let composerFocus: ChatComposerFocus
     let downloadFlight: DownloadFlight
     let onBack: () -> Void
@@ -111,11 +113,12 @@ struct ChatHeaderView: View, Equatable {
         let presentation = facts.modelPresentation ?? .make(runtime: runtime, connected: false)
         return OrbisHeader {
             OrbisIconButton(symbol: "arrow.left", label: L10n.tr("返回"), action: onBack)
-            if foldReading {
+            if foldReading || UIDevice.current.userInterfaceIdiom == .phone &&
+                (horizontalSizeClass == .regular || verticalSizeClass == .compact) {
                 OrbisIconButton(symbol: "sidebar.left", label: L10n.tr("打开会话目录")) {
                     composerFocus.focused = false
                     openDirectory()
-                }.accessibilityIdentifier("fold-reading-directory")
+                }.accessibilityIdentifier(foldReading ? "fold-reading-directory" : "chat-session-directory")
             }
         } title: {
             VStack(alignment: .leading, spacing: 4) {
