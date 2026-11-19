@@ -170,7 +170,10 @@ export class CodexAppServer {
         // Unload only after the final subscriber leaves AND the turn is idle.
         const child = spawnFn(command, [...prefixArgs, "app-server",
           "-c", "thread_unload_delay_secs=0", "--listen", server.#endpoint], {
-          stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: codexTerminalEnvironment(),
+          stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+          // Only Desktop owns the native remote registration. Independent terminal
+          // servers must not compete for its persisted installation identity.
+          env: { ...codexTerminalEnvironment(), CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1" },
         });
         server.#child = child;
         server.#attachChildLogging(child);

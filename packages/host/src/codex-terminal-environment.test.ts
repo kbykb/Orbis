@@ -31,6 +31,8 @@ describe("independent Codex terminal source environment", () => {
         } })).rejects.toThrow("stop before starting fixture");
       expect(childEnv).toBeDefined();
       expect(childEnv!.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBeUndefined();
+      expect(childEnv!.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED).toBe("1");
+      expect(process.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED).toBeUndefined();
       expect(childEnv!.PATH).toBe(process.env.PATH);
       expect(process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBe("Codex Desktop");
     } finally { await rm(root, { recursive: true, force: true }); }
