@@ -29,6 +29,7 @@
         64C3F8243EDD18A1B2F98489 /* ChatMessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2CC3A7FB21F94C1E8CEFC97; };
         48C9131EA30DFABA87F879B9 /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5204809A5B06BD2744B651E; };
         A11900010000000000000001 /* AttachmentFilePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11910010000000000000001; };
+        A11900010000000000000002 /* MobileDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11910010000000000000002; };
         7A8339F274E140F2938BADA5 /* ChatTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C54B3BAF4E82D69C4D2724; };
         C98200020000000000000001 /* ChatNativeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C98210020000000000000001; };
         C98200020000000000000002 /* ChatNativeTranscriptEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C98210020000000000000002; };
@@ -121,6 +122,7 @@
         D2CC3A7FB21F94C1E8CEFC97 /* ChatMessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessageRow.swift; sourceTree = "<group>"; };
         A5204809A5B06BD2744B651E /* ChatComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerView.swift; sourceTree = "<group>"; };
         A11910010000000000000001 /* AttachmentFilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentFilePicker.swift; sourceTree = "<group>"; };
+        A11910010000000000000002 /* MobileDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDiagnostics.swift; sourceTree = "<group>"; };
         14C54B3BAF4E82D69C4D2724 /* ChatTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptView.swift; sourceTree = "<group>"; };
         C98210020000000000000001 /* ChatNativeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatNativeTranscriptView.swift; sourceTree = "<group>"; };
         C98210020000000000000002 /* ChatNativeTranscriptEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatNativeTranscriptEnvironment.swift; sourceTree = "<group>"; };
@@ -301,6 +303,7 @@
                 C98210020000000000000003 /* ChatTranscriptInteractionState.swift */,
                 A5204809A5B06BD2744B651E /* ChatComposerView.swift */,
                 A11910010000000000000001 /* AttachmentFilePicker.swift */,
+                A11910010000000000000002 /* MobileDiagnostics.swift */,
                 D2CC3A7FB21F94C1E8CEFC97 /* ChatMessageRow.swift */,
                 ABA69147CCA95C8B28B5ECA9 /* ChatMarkdownView.swift */,
                 1B57CBCB214140E9324C6786 /* ChatConfigurationViews.swift */,
@@ -531,6 +534,7 @@
                 C98200020000000000000003 /* ChatTranscriptInteractionState.swift in Sources */,
                 48C9131EA30DFABA87F879B9 /* ChatComposerView.swift in Sources */,
                 A11900010000000000000001 /* AttachmentFilePicker.swift in Sources */,
+                A11900010000000000000002 /* MobileDiagnostics.swift in Sources */,
                 64C3F8243EDD18A1B2F98489 /* ChatMessageRow.swift in Sources */,
                 BB9D500A260FB66F4F3344D5 /* ChatMarkdownView.swift in Sources */,
                 8805B409FEE81C340BA71E36 /* ChatConfigurationViews.swift in Sources */,

@@ -68,7 +68,8 @@ private struct ComposerDraftPresentation: Equatable {
 
 /// IOS-CHAT-01: editor state and its local presentation belong to this subtree. A keystroke
 /// persists through HostConnection without invalidating ChatView's transcript/navigation state.
-private struct ChatFileSelection {
+private struct ChatFileSelection: Identifiable {
+    let id = UUID().uuidString
     let actions: ChatSessionActions
     let capacity: Int
 }
@@ -166,7 +167,6 @@ struct ChatComposerView: View, Equatable {
     @State private var selectedCommand: String?
     @State private var deliveryChoices = false
     @State private var permissionsOpen = false
-    @State private var filePickerOpen = false
     @State private var photoPickerOpen = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var photoSelection: ChatFileSelection?
@@ -319,14 +319,11 @@ struct ChatComposerView: View, Equatable {
             .photosPicker(isPresented: $photoPickerOpen, selection: $selectedPhotos,
                           maxSelectionCount: max(1, photoSelection?.capacity ?? 10), matching: .images,
                           preferredItemEncoding: .compatible)
-            .sheet(isPresented: $filePickerOpen, onDismiss: { fileSelection = nil }) {
-                AttachmentFilePicker(onPick: { urls in
-                    let selection = fileSelection
-                    filePickerOpen = false
+            .sheet(item: $fileSelection) { selection in
+                AttachmentFilePicker(attemptId: selection.id, onPick: { urls in
                     fileSelection = nil
-                    if let selection { selection.actions.upload(urls, capacity: selection.capacity) }
+                    selection.actions.upload(urls, capacity: selection.capacity)
                 }, onCancel: {
-                    filePickerOpen = false
                     fileSelection = nil
                 })
             }
@@ -368,8 +365,9 @@ struct ChatComposerView: View, Equatable {
                     OrbisMenuItem(title: L10n.tr("文件"), symbol: "folder", identifier: "chat-attach-files") {
                         let capacity = max(0, 10 - attachments.count)
                         guard actions.isCurrent, capacity > 0 else { return }
-                        fileSelection = ChatFileSelection(actions: actions, capacity: capacity)
-                        filePickerOpen = true
+                        let selection = ChatFileSelection(actions: actions, capacity: capacity)
+                        MobileDiagnostics.shared.beginFilePicker(detail: ["attemptId": selection.id, "source": "files"])
+                        fileSelection = selection
                     }
                 ]
             }.disabled(!facts.canSend || facts.preparing || preparingPhotos || attachments.count >= 10)

@@ -73,10 +73,20 @@ struct OrbisApp: App {
             .preferredColorScheme(preferredScheme)
             .environment(\.locale, AppLocalization.shared.locale)
             .environment(\.layoutDirection, .leftToRight)
-            .task { prepareReplyNotifications() }
+            .task {
+                prepareReplyNotifications()
+                store.configureMobileDiagnostics(MobileDiagnostics.shared)
+                MobileDiagnostics.shared.record("app.ready", detail: [
+                    "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                    "system": UIDevice.current.systemVersion
+                ])
+                MobileDiagnostics.shared.setForeground(scenePhase == .active)
+            }
             .onChange(of: store.pairings) { _, _ in prepareReplyNotifications() }
             .onChange(of: AppLocalization.shared.language) { _, _ in prepareReplyNotifications() }
             .onChange(of: scenePhase) { _, phase in
+                MobileDiagnostics.shared.setForeground(phase == .active)
                 if phase == .active {
                     AppLocalization.shared.refreshSystemLanguage(); prepareReplyNotifications()
                 } else {

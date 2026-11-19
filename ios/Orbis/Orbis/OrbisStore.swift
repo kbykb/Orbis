@@ -62,6 +62,9 @@ final class HostConnection: ObservableObject {
     @Published private(set) var selectedRuntimeId: String? { didSet { directoryViewRevision &+= 1 } }
     @Published private(set) var connection: ConnectionState = .offline { didSet { markHomeMetadataChanged(); directoryViewRevision &+= 1 } }
     @Published private(set) var activePath: String? { didSet { homeViewRevision &+= 1 } }
+    private(set) var mobileDiagnosticsSupported = false
+    var mobileDiagnosticsDidChange: (() -> Void)?
+    var mobileDiagnosticsAcknowledged: ((String) -> Void)?
     @Published private(set) var feedback = FeedbackState()
     /// Read-only compatibility projection; every writer declares F3/F4 at the call site.
     var errorMessage: String? { feedback.banner?.text }
@@ -970,6 +973,13 @@ final class HostConnection: ObservableObject {
         connect(pairing: pairing, identity: identity)
     }
 
+    func sendMobileDiagnostics(_ batch: [String: Any]) -> Bool {
+        guard connection == .secured, mobileDiagnosticsSupported else { return false }
+        var message = batch
+        message["protocolVersion"] = orbisProtocolVersion
+        return transport.send(message)
+    }
+
     func reconnectSelectedHost() {
         if let selectedHostId { connect(hostId: selectedHostId) }
     }
@@ -1031,6 +1041,8 @@ final class HostConnection: ObservableObject {
             if state != .secured { self.pendingSends.connectionLost(); self.ledgerCloseConnection(); self.replyCompletions.resetActive() }
             else { self.ledgerOpenConnection() }
             self.connection = state
+            if state != .secured { self.mobileDiagnosticsSupported = false }
+            self.mobileDiagnosticsDidChange?()
             if state != .secured { self.pathRTT = nil }
             if state != .secured { self.homeDirectoryReceived = false }
             self.recordConnectionEvent(L10n.tr("连接：{0}", state.rawValue))
@@ -2984,6 +2996,7 @@ final class HostConnection: ObservableObject {
             if let selectedRuntime { syncSession(selectedRuntime, force: true) }
         case "device.ready":
             guard channel != nil, let values = message["runtimes"] as? [[String: Any]] else { return }
+            mobileDiagnosticsSupported = (message["hostFeatures"] as? [String])?.contains("diagnostics.mobile") == true
             // A Host that can show DeepSeek Desktop first sends the view released Apps parse (no `dshDesktop` key).
             // Declare the feature and wait for the full view, so a selected Desktop session is never dropped.
             if (message["hostFeatures"] as? [String])?.contains("device.features") == true, message["dshDesktop"] == nil,
@@ -3039,6 +3052,7 @@ final class HostConnection: ObservableObject {
             if let selectedRuntime { saveLastSession(selectedRuntime) }
             setHistoryConnection(true)
             connection = .secured
+            mobileDiagnosticsDidChange?()
             if sessionLaunchErrorAwaitsConnection { sessionLaunchError = nil }
             hostState.setConnection(selectedHost, connected: true)
             agentState.setConnection(selectedHost, connected: true)
@@ -3059,6 +3073,8 @@ final class HostConnection: ObservableObject {
             publishMessages()
             if let selectedRuntime { seedCachedHistory(selectedRuntime); publishMessages(); agentState.subscribe(runtime: selectedRuntime); syncSession(selectedRuntime, force: hostRestarted || selectedLeafChanged) }
             refreshSessions()
+        case "diagnostics.mobile.ack":
+            if let batchId = message["batchId"] as? String { mobileDiagnosticsAcknowledged?(batchId) }
         case "runtime.online":
             if let object = message["runtime"] as? [String: Any], let incoming: RuntimeSummary = jsonDecode(object) {
                 let runtime = reprojectRuntime(incoming)

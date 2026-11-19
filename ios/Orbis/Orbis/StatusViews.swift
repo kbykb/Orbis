@@ -62,6 +62,7 @@ struct ConnectionStatusView: View {
                             }.frame(minHeight: 56).contentShape(Rectangle())
                         }.buttonStyle(.plain).accessibilityIdentifier("settings-language")
                     }
+                    StatusSection(title: L10n.tr("调试")) { MobileDiagnosticsSettings() }
                 }.padding(.horizontal, 20).padding(.vertical, 16)
             }.accessibilityIdentifier("settings-page")
         }.background(palette.base.ignoresSafeArea())
@@ -182,6 +183,42 @@ struct ConnectionStatusView: View {
         let title = choice == .system ? L10n.tr("跟随系统") : choice == .chinese ? "简体中文" : "English"
         return OrbisChoiceRow(title: title, subtitle: "", selected: selected) { AppLocalization.shared.select(choice) }
             .accessibilityIdentifier("language-\(choice.rawValue)")
+    }
+}
+
+private struct MobileDiagnosticsSettings: View {
+    @ObservedObject private var diagnostics = MobileDiagnostics.shared
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(L10n.tr("附件调试模式"), isOn: Binding(get: { diagnostics.enabled }, set: {
+                diagnostics.setEnabled($0, context: [
+                    "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                    "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                    "system": UIDevice.current.systemVersion
+                ])
+            })).font(.orbisBody(.semibold)).accessibilityIdentifier("mobile-diagnostics-toggle")
+            Text(L10n.tr("记录附件窗口和主线程状态，加密发送到当前连接的电脑。不采集聊天、文件内容或文件名。卡住后强退重开，会补传已保存的记录。"))
+                .font(.orbisCaption()).foregroundStyle(OrbisPalette(scheme).secondary)
+            if diagnostics.enabled {
+                if diagnostics.storageError {
+                    Text(L10n.tr("调试记录保存失败，请保持应用打开并重试发送。"))
+                        .font(.orbisCaption()).foregroundStyle(OrbisPalette(scheme).error)
+                }
+                Text(L10n.tr("待回传：{0} 条", diagnostics.pendingCount)).font(.orbisLabel())
+                    .accessibilityIdentifier("mobile-diagnostics-pending")
+                if let date = diagnostics.lastUploadAt {
+                    Text(L10n.tr("电脑已接收：{0}", date.formatted(date: .omitted, time: .standard)))
+                        .font(.orbisCaption()).foregroundStyle(OrbisPalette(scheme).secondary)
+                        .accessibilityIdentifier("mobile-diagnostics-uploaded")
+                }
+                OrbisActionButton(title: L10n.tr("发送调试记录")) {
+                    diagnostics.record("diagnostics.manual_upload")
+                    diagnostics.flush()
+                }.accessibilityIdentifier("mobile-diagnostics-send")
+            }
+        }.padding(.vertical, 12)
     }
 }
 

@@ -9,6 +9,8 @@ import { SessionConfigurationReadSchema, SessionConfigurationSaveSchema, Configu
 export * from "./session-configuration.js";
 import { SessionGoalReadSchema, SessionGoalSetSchema, SessionGoalEventSchema } from "./session-goal.js";
 export * from "./session-goal.js";
+import { MobileDiagnosticsBatchSchema, MobileDiagnosticsAckSchema } from "./mobile-diagnostics.js";
+export * from "./mobile-diagnostics.js";
 export { orbisEnvironment } from "./product-environment.js";
 export { parseQaActivation, type QaActivation } from "./qa-activation.js";
 import {
@@ -1296,6 +1298,7 @@ export const DeviceE2ePayloadSchema = z.discriminatedUnion("type", [
   AgentStateRangeRequestSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
   // ── 诊断记录的分页读取（ADR-0032 模块 23）：快照只给目录，记录本身按游标一页页取。
   DiagnosticsRequestSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
+  MobileDiagnosticsBatchSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
   // ── 接收方驱动的范围下载（ADR-0005）。设备发 read 索取一段，Host 只按范围应答：
   // 请求与响应都是 E2E 载荷（Relay 只按 hdr.to 路由，看不到 offset/长度），
   // 分片沿用既有 `bin` 帧。发送方不维护窗口/重传/进度，全部状态在设备侧。
@@ -1474,6 +1477,7 @@ export const RelayToDeviceMessageSchema = z.discriminatedUnion("type", [
   AgentStateSnapshotSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
   AgentStateRangePageSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
   DiagnosticsPageMessageSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
+  MobileDiagnosticsAckSchema.safeExtend({ protocolVersion: z.literal(PROTOCOL_VERSION) }),
   // ── 进程激活（spec §8）的响应。`session.activated` 只证明进程已被拉起；会话真正上线
   // 由随后的 runtime.online / session.catalog 对账（进程经 loopback 自己注册回来）。
   z.strictObject({

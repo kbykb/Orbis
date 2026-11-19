@@ -1701,5 +1701,12 @@
   "受阻": "Blocked",
   "已达用量限制": "Usage limit reached",
   "已达预算": "Budget reached",
-  "历史消息同步失败，请重试": "History sync failed. Retry."
+  "历史消息同步失败，请重试": "History sync failed. Retry.",
+  "调试": "Debugging",
+  "附件调试模式": "Attachment diagnostics",
+  "调试记录保存失败，请保持应用打开并重试发送。": "Diagnostics could not be saved. Keep the app open and try sending again.",
+  "记录附件窗口和主线程状态，加密发送到当前连接的电脑。不采集聊天、文件内容或文件名。卡住后强退重开，会补传已保存的记录。": "Records attachment picker and main thread events and sends them to the connected computer over the encrypted connection. No chats, file contents, or file names are collected. Saved events are sent after reopening the app if it freezes.",
+  "待回传：{0} 条": "Pending upload: {0} events",
+  "电脑已接收：{0}": "Received by computer: {0}",
+  "发送调试记录": "Send diagnostics"
 }

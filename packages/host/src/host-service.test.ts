@@ -760,6 +760,63 @@ describe("host end-to-end over relay", () => {
     expect(store.devices.find(item => item.deviceId === device!.deviceId)).toMatchObject({ appVersion: "0.1.49", appVersionCode: 50 });
   });
 
+  it("persists mobile diagnostics only from a paired encrypted device and acknowledges only successful writes", async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-mobile-diagnostics-e2e-"));
+    relay = await startRelay(stateDir);
+    const errors = vi.fn();
+    host = await HostService.create({ relayUrl: relay.url, ...relayBusinessHostOptions(relay.url), credential: "runtime-secret",
+      adminToken: "owner-secret", stateDir, reconnect: false, lanPort: 0, onDeviceError: errors });
+    await host.start();
+    const path = join(stateDir, "mobile-diagnostics.ndjson");
+    const batch = { type: "diagnostics.mobile.batch", protocolVersion: PROTOCOL_VERSION, batchId: "picker-attempt",
+      events: [{ id: "event-1", at: 1, event: "attachment.picker.present", severity: "info", detail: { source: "files" } }] };
+
+    const socket = new WebSocket(`ws://127.0.0.1:${host.lan!.port}/v1/lan`);
+    await new Promise<void>((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    const closed = new Promise<number>(resolve => { socket.once("close", resolve); });
+    socket.send(JSON.stringify(batch));
+    socket.send(JSON.stringify({ type: "v2.frame", protocolVersion: PROTOCOL_VERSION, envelope: buildPlaintextEnvelope({
+      kind: "hs", room: "h", from: "unpaired-phone", to: "host", body: { type: "hs1", ePubD: "AAAA" },
+    }) }));
+    expect(await closed).toBe(1008);
+    expect(existsSync(path)).toBe(false);
+
+    const paired = await pairDevice({ relay, host });
+    device = paired.device;
+    await device.openChannel("relay", paired.pskRoot, paired.payload.hostId, paired.payload.hostId);
+    expect((await device.receiveMessage()).hostFeatures).toContain("diagnostics.mobile");
+    await device.receiveMessage();
+
+    // A disk failure must leave the phone's batch unacknowledged for its next retry.
+    await mkdir(path);
+    const encrypted = device.sendData(JSON.stringify(batch));
+    expect(JSON.stringify(encrypted)).not.toContain("attachment.picker.present");
+    await vi.waitFor(() => expect(errors).toHaveBeenCalled());
+    for (let count = 0; count < 20; count++) {
+      let incoming: Incoming;
+      try { incoming = await device.nextIncoming(100); }
+      catch (error) { expect(String(error)).toContain("等待 v2 帧超时"); break; }
+      if ("payload" in incoming) expect(JSON.parse(incoming.payload.toString()).type).not.toBe("diagnostics.mobile.ack");
+    }
+    await rm(path, { recursive: true });
+
+    const receiveAck = async (): Promise<Record<string, unknown>> => {
+      for (let count = 0; count < 20; count++) {
+        const message = await device!.receiveMessage();
+        if (message.type === "diagnostics.mobile.ack") return message;
+      }
+      throw new Error("Mobile diagnostic acknowledgement was not received");
+    };
+    device.sendData(JSON.stringify(batch));
+    const ack = await receiveAck();
+    expect(RelayToDeviceMessageSchema.parse(ack)).toMatchObject({ type: "diagnostics.mobile.ack", batchId: batch.batchId });
+    const text = await readFile(path, "utf8");
+    expect(JSON.parse(text.trim())).toMatchObject({ deviceId: device.deviceId, batchId: batch.batchId, receivedAt: ack.storedAt, ...batch.events[0] });
+    device.sendData(JSON.stringify(batch));
+    expect(await receiveAck()).toEqual(ack);
+    expect(await readFile(path, "utf8")).toBe(text);
+  });
+
   it("lists and switches local provider profiles over an authenticated encrypted channel without exposing secrets", async () => {
     stateDir = await mkdtemp(join(tmpdir(), "orbis-provider-e2e-"));
     relay = await startRelay(stateDir);
@@ -3799,7 +3856,7 @@ describe("Codex 虚拟 runtime 接线（spec §7.4 的 M4 验收）", () => {
       expect(ready.ready.agents).not.toContain("dshDesktop");
       expect(ready.ready.launchableAgents).not.toContain("dshDesktop");
       expect(ready.ready).not.toHaveProperty("dshDesktop");
-      expect(ready.ready.hostFeatures).toEqual(["device.features"]);
+      expect(ready.ready.hostFeatures).toEqual(["device.features", "diagnostics.mobile"]);
       RelayToDeviceMessageSchema.parse(ready.ready);
       const until = async (predicate: (message: Record<string, unknown>) => boolean) => {
         for (let i = 0; i < 80; i++) {

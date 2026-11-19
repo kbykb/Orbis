@@ -75,6 +75,14 @@ final class OrbisStore: ObservableObject {
     // FT-G12-RESUME-01: navigation/scene visibility belongs to the selected Host
     // projection and must follow it even when the chat view remains mounted.
     private var historyWindowVisible = false
+    private var mobileDiagnostics: MobileDiagnostics?
+
+    func configureMobileDiagnostics(_ diagnostics: MobileDiagnostics) {
+        mobileDiagnostics = diagnostics
+        diagnostics.setTransport { [weak self] batch in
+            self?.activeConnection.sendMobileDiagnostics(batch) ?? false
+        }
+    }
 
     init(secure: SecureStorage = SecureStore.shared, transport: OrbisTransport? = nil, deviceName: String? = nil,
          autoConnect: Bool = true, preferences: UserDefaults? = .standard, transferRoot: URL? = nil,
@@ -122,6 +130,19 @@ final class OrbisStore: ObservableObject {
         let connection = HostConnection(secure: secure, transport: factory(pairing), deviceName: deviceName,
             autoConnect: false, preferences: preferences, transferRoot: root, initialPairing: pairing, isolated: true, historyWorker: historyWorker, localStores: localStores)
         connection.didUpdatePairing = { [weak self] updated in self?.updatePairing(updated) }
+        connection.mobileDiagnosticsDidChange = { [weak self, weak connection] in
+            guard let self, let connection, self.activeConnection === connection else { return }
+            self.mobileDiagnostics?.record("connection.changed", detail: [
+                "state": connection.connection.rawValue,
+                "path": connection.activePath ?? "unknown",
+                "uploadSupported": String(connection.mobileDiagnosticsSupported)
+            ])
+            self.mobileDiagnostics?.flush()
+        }
+        connection.mobileDiagnosticsAcknowledged = { [weak self, weak connection] batchId in
+            guard let self, self.activeConnection === connection else { return }
+            self.mobileDiagnostics?.acknowledge(batchId: batchId)
+        }
         connections[pairing.hostId] = connection
         observations[pairing.hostId] = connection.objectWillChange.sink { [weak self] _ in self?.publishChanges(hostId: pairing.hostId) }
         if connect { started.insert(pairing.hostId); connection.connect(hostId: pairing.hostId) }
@@ -204,6 +225,7 @@ final class OrbisStore: ObservableObject {
             connections[hostId]?.clearFeedbackScope(preservingConnectionConditions: true)
         }
         selectedHostId = hostId; pairingError = nil
+        mobileDiagnostics?.flush()
         activeConnection.setHistoryWindowVisible(historyWindowVisible)
         setFeedbackForeground(feedbackForeground)
         preferences?.set(hostId, forKey: "orbis.selectedHostId")

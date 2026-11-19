@@ -44,6 +44,7 @@ import {
   DeviceE2ePayloadSchema,
   DEVICE_FEATURE_DSH_DESKTOP,
   HOST_FEATURE_DEVICE_FEATURES,
+  HOST_FEATURE_MOBILE_DIAGNOSTICS,
   PROTOCOL_VERSION,
   type AgentKind,
   type HostProviderSummary,
@@ -80,6 +81,7 @@ import {
 } from "./diagnostic-journal.js";
 import { createDiagnosticJournalFileStore } from "./diagnostic-journal-file-store.js";
 import { buildDiagnosticsPageMessage } from "./diagnostic-page-message.js";
+import { MobileDiagnosticStore } from "./mobile-diagnostic-store.js";
 import { HostStateFacts, providerSwitchingFact } from "./host-state-facts.js";
 import { HostDownloadService, hostArtifactIndexPath } from "./artifact-download.js";
 import { normalizeDeviceRequest } from "./device-protocol.js";
@@ -358,6 +360,7 @@ export class HostService {
   readonly #hostStateFacts: HostStateFacts;
   /** 有界诊断记录（ADR-0032 模块 23）：写不进去也不影响被记录的那次操作；落盘见构造函数。 */
   readonly #diagnostics: DiagnosticJournal;
+  readonly #mobileDiagnostics: MobileDiagnosticStore;
 
   /** 记一条诊断：记录失败永远不能反过来影响被记录的那次操作。 */
   recordDiagnostic(input: DiagnosticAppendInput): void {
@@ -761,6 +764,7 @@ export class HostService {
     this.#sessionConfigurations = new SessionConfigurationStore(join(stateDir, "session-configuration.json"));
     // 记录要跨重启保留：重启后「上一轮为什么连不上」仍然读得到，否则排查只能靠现场的这一次。
     this.#diagnostics = new DiagnosticJournal({ persistence: createDiagnosticJournalFileStore(stateDir) });
+    this.#mobileDiagnostics = new MobileDiagnosticStore(stateDir);
     this.#identity = identity;
     this.#store = store;
     this.#toolContentService = new ToolContentService({
@@ -1563,7 +1567,7 @@ export class HostService {
       launchableAgents: this.#launchableAgentsSnapshot(),
       codexDesktop: this.#codexDesktopSnapshot(),
       dshDesktop: this.#dshDesktopSnapshot(),
-      hostFeatures: [HOST_FEATURE_DEVICE_FEATURES],
+      hostFeatures: [HOST_FEATURE_DEVICE_FEATURES, HOST_FEATURE_MOBILE_DIAGNOSTICS],
       sessionConfiguration: 1,
     };
   }
@@ -1823,6 +1827,7 @@ export class HostService {
     // 上传索引与 `.part` 句柄同样是脱离调用栈的写。进程退出前不等它们，下次启动就少一截
     // 可续传的状态——用户要重传的不是几个分片，是整个文件。
     await this.#uploads.flush();
+    await this.#mobileDiagnostics.flush();
     await this.#toolContentStore?.dispose(); this.#toolContentStore = undefined;
     await Promise.allSettled([...this.#providerFactsPending]);
     this.#modelLifecycle = "stopped";
@@ -2162,6 +2167,16 @@ export class HostService {
         this.#sendToDevice(deviceId, { type: "agent.state.range.page", protocolVersion: PROTOCOL_VERSION,
           requestId: message.requestId, scope: "host", domain: "catalog", page });
       }).catch(error => { this.#options.onDeviceError?.(deviceId, error); });
+      return;
+    }
+    if (message.type === "diagnostics.mobile.batch") {
+      void this.#mobileDiagnostics.append(deviceId, message).then(storedAt => {
+        if (this.#serviceClosed) return;
+        this.#sendToDevice(deviceId, { type: "diagnostics.mobile.ack", protocolVersion: PROTOCOL_VERSION, batchId: message.batchId, storedAt });
+      }).catch(error => {
+        this.#options.onDeviceError?.(deviceId, error);
+        this.#options.log?.(`Mobile diagnostic batch was not saved: ${describeError(error)}`);
+      });
       return;
     }
     if (message.type === "diagnostics.request") {

@@ -2992,6 +2992,43 @@ final class OrbisUITests: XCTestCase {
         capture("claude-busy-host-accepted", app: app)
     }
 
+    func testAttachmentDiagnosticsCanBeEnabledAndSurviveReopening() {
+        let settings = launch("status")
+        let toggle = settings.switches["mobile-diagnostics-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 8))
+        let page = settings.descendants(matching: .any)["settings-page"].firstMatch
+        if !toggle.isHittable { page.swipeUp() }
+        if toggle.value as? String == "0" { toggle.tap() }
+        XCTAssertEqual(toggle.value as? String, "1")
+        XCTAssertTrue(settings.buttons["mobile-diagnostics-send"].waitForExistence(timeout: 3))
+        settings.buttons["mobile-diagnostics-send"].tap()
+        capture("attachment-diagnostics-enabled", app: settings)
+        settings.terminate()
+
+        // Exercise the actual native picker while diagnostic collection is on.
+        let chat = launch("chat")
+        XCTAssertTrue(chat.buttons["发送文件到电脑"].waitForExistence(timeout: 8))
+        chat.buttons["发送文件到电脑"].tap()
+        chat.buttons["chat-attach-files"].tap()
+        let cancel = chat.buttons.matching(NSPredicate(format: "label IN %@", ["取消", "Cancel"])).firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 8))
+        capture("attachment-diagnostics-picker", app: chat)
+        cancel.tap()
+        XCTAssertTrue(chat.descendants(matching: .any)["chat-composer"].firstMatch.waitForExistence(timeout: 4))
+        chat.terminate()
+
+        let reopened = launch("status")
+        let restored = reopened.switches["mobile-diagnostics-toggle"]
+        XCTAssertTrue(restored.waitForExistence(timeout: 8))
+        let restoredPage = reopened.descendants(matching: .any)["settings-page"].firstMatch
+        if !restored.isHittable { restoredPage.swipeUp() }
+        XCTAssertEqual(restored.value as? String, "1")
+        XCTAssertTrue(reopened.staticTexts["mobile-diagnostics-pending"].exists)
+        capture("attachment-diagnostics-reopened", app: reopened)
+        restored.tap()
+        XCTAssertEqual(restored.value as? String, "0")
+    }
+
     func testAttachmentChooserSeparatesPhotosAndFilesAndKeepsTheDraft() {
         let app = launch("chat")
         let composer = app.descendants(matching: .any)["chat-composer"].firstMatch
