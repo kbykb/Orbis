@@ -14,12 +14,15 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
@@ -73,6 +76,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     private val pairingErrors = MutableStateFlow<String?>(null)
     private val pairingProgress = MutableStateFlow(false)
     private var feedbackForeground = false
+    private val notificationOpens = NotificationOpenQueue()
+    private var notificationOpenJob: Job? = null
+    private val notificationNavigation = MutableStateFlow<Long?>(null)
+    internal val notificationNavigationToken: StateFlow<Long?> = notificationNavigation
     // StateFlow conflation compares immutable snapshots. Streamed history can make those
     // comparisons expensive, so both aggregation and publication belong to Default.
     private val publicationScope = CoroutineScope(viewModelScope.coroutineContext + Dispatchers.Default)
@@ -166,7 +173,52 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Selects the Host the interactive screens operate on. */
     fun selectHost(hostId: String) {
+        cancelNotificationOpen()
         setActiveHost(hostId)
+    }
+
+    internal fun cancelNotificationOpen() {
+        notificationOpenJob?.cancel()
+        notificationOpenJob = null
+        notificationOpens.cancel()
+        notificationNavigation.value = null
+    }
+
+    internal fun consumeNotificationNavigation(token: Long): Boolean {
+        if (notificationNavigation.value != token) return false
+        notificationNavigation.value = null
+        return true
+    }
+
+    /** Opens only a session already present on the paired Host; this never starts an agent. */
+    internal fun openNotification(target: NotificationOpenTarget) {
+        cancelNotificationOpen()
+        val connection = connectionFor(target.hostId) ?: return
+        if (!target.matches(connection.pairing)) return
+        connection.stopSessionRestoration()
+        val token = notificationOpens.enqueue(target)
+        notificationOpenJob = viewModelScope.launch {
+            val destination = withTimeoutOrNull(30_000) {
+                // Transcript tokens keep the same directory map. Only directory/readiness changes
+                // can resolve a notification, so do not inspect every runtime on streamed text.
+                connection.state.distinctUntilChanged { before, after ->
+                    before.connection == after.connection && before.e2eReady == after.e2eReady &&
+                        before.homeDirectoryReceived == after.homeDirectoryReceived &&
+                        before.runtimes === after.runtimes &&
+                        before.sessions[target.sessionId]?.hasHistoryCache == after.sessions[target.sessionId]?.hasHistoryCache
+                }.map { notificationOpens.resolve(token, connection.pairing, it) }.first { it != null }
+            } ?: notificationOpens.resolve(token, connection.pairing, connection.state.value, expired = true)
+            if (connectionFor(target.hostId) !== connection || !target.matches(connection.pairing)) return@launch
+            if (destination == null || destination == NotificationOpenDestination.Invalid) return@launch
+            setActiveHost(target.hostId)
+            when (destination) {
+                is NotificationOpenDestination.Runtime -> connection.selectRuntime(destination.runtimeId)
+                is NotificationOpenDestination.History -> connection.selectOfflineSession(destination.sessionId)
+                NotificationOpenDestination.Home -> connection.selectRuntime(null)
+                NotificationOpenDestination.Invalid -> Unit
+            }
+            notificationNavigation.value = token
+        }
     }
 
     /** Saves phone-to-Relay selection for the active Host. */
@@ -195,6 +247,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Removes a pairing, its live connection and everything cached under it. */
     fun unpair(hostId: String? = activeHostId.value) {
+        cancelNotificationOpen()
         val id = hostId ?: return
         val connection = synchronized(lock) { connections.remove(id) }
         observationJobs.remove(id)?.cancel()
@@ -351,6 +404,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Switches to [hostId] and opens its runtime (or activates the Session) in one step. */
     fun openSession(hostId: String, sessionId: String) {
+        cancelNotificationOpen()
         val connection = connectionFor(hostId) ?: return
         setActiveHost(hostId)
         val runtime = connection.state.value.runtimes.values.firstOrNull { it.sessionId == sessionId }
@@ -358,12 +412,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openOfflineSession(hostId: String, sessionId: String) {
+        cancelNotificationOpen()
         val connection = connectionFor(hostId) ?: return
         setActiveHost(hostId)
         connection.selectOfflineSession(sessionId)
     }
 
     fun openRuntime(hostId: String, runtimeId: String) {
+        cancelNotificationOpen()
         val connection = connectionFor(hostId) ?: return
         setActiveHost(hostId)
         connection.selectRuntime(runtimeId)
@@ -401,7 +457,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearActivationNotice() = active()?.clearActivationNotice()
 
-    fun selectRuntime(runtimeId: String?) = active()?.selectRuntime(runtimeId)
+    fun selectRuntime(runtimeId: String?) {
+        cancelNotificationOpen()
+        active()?.selectRuntime(runtimeId)
+    }
 
     fun refreshWorkingBranch(runtimeId: String) = active()?.refreshWorkingBranch(runtimeId)
 
@@ -413,7 +472,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshAfterBranchAction(runtimeId: String) = active()?.refreshAfterBranchAction(runtimeId)
 
-    fun selectOfflineSession(sessionId: String?) = active()?.selectOfflineSession(sessionId)
+    fun selectOfflineSession(sessionId: String?) {
+        cancelNotificationOpen()
+        active()?.selectOfflineSession(sessionId)
+    }
 
     fun loadOlderHistory(runtimeId: String? = null): HistoryReadAcceptance {
         val connection = active() ?: return HistoryReadAcceptance(rejection = L10n.tr("没有选中的历史窗口"))

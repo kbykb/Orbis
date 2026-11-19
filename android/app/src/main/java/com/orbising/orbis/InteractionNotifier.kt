@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.core.content.ContextCompat
 
 class InteractionNotifier(private val context: Context) {
@@ -26,28 +27,21 @@ class InteractionNotifier(private val context: Context) {
         ))
     }
 
-    internal fun showReplyCompleted(reply: ConfirmedReplyCompletion) {
+    internal fun showReplyCompleted(reply: ConfirmedReplyCompletion, target: NotificationOpenTarget?) {
         if (!replyReceipts.claim(reply.identity)) return
         preferences.edit().putStringSet("seen", replyReceipts.snapshot()).apply()
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val intent = PendingIntent.getActivity(context, 0,
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val intent = contentIntent(target)
         notifications.notify(reply.identity, 0, Notification.Builder(context, REPLY_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_orbis).setContentTitle(L10n.tr("回复完成"))
             .setContentText(reply.runtimeName).setContentIntent(intent).setAutoCancel(true).build())
     }
 
-    fun show(runtimeName: String, request: PendingInteraction) {
+    internal fun show(runtimeName: String, request: PendingInteraction, target: NotificationOpenTarget?) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             return
         }
-        val intent = PendingIntent.getActivity(
-            context,
-            0,
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val intent = contentIntent(target)
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_orbis)
             .setContentTitle(request.title)
@@ -55,12 +49,33 @@ class InteractionNotifier(private val context: Context) {
             .setContentIntent(intent)
             .setAutoCancel(true)
             .build()
-        notifications.notify(request.requestId.hashCode(), notification)
+        notifications.notify("${target?.intentData.orEmpty()}:${request.requestId}", 0, notification)
     }
+
+    private fun contentIntent(target: NotificationOpenTarget?): PendingIntent = PendingIntent.getActivity(
+        context, 0,
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).apply {
+            action = OPEN_NOTIFICATION
+            // Intent extras do not distinguish PendingIntents. Give every target its own data URI.
+            data = target?.let { Uri.parse(it.intentData) }
+        },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
 
     private companion object {
         // Stable Android channel ID preserves the user's existing notification settings.
         const val CHANNEL_ID = "pi_remote_interactions"
         const val REPLY_CHANNEL_ID = "orbis_reply_completion"
     }
+}
+
+internal const val OPEN_NOTIFICATION = "com.orbising.orbis.OPEN_NOTIFICATION"
+
+internal fun Intent.notificationOpenTarget(): NotificationOpenTarget? {
+    if (action != OPEN_NOTIFICATION) return null
+    val uri = data ?: return null
+    if (uri.scheme != "orbis" || uri.authority != "notification" || uri.query != null || uri.fragment != null) return null
+    val fields = uri.pathSegments
+    if (fields.size != 4) return null
+    return NotificationOpenTarget.create(fields[0], fields[1], fields[2], fields[3])
 }

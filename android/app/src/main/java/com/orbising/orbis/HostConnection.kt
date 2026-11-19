@@ -1207,6 +1207,8 @@ internal class HostConnection(
     }
 
     /** Runtime is the interaction window; its current session follows its metadata. */
+    internal fun stopSessionRestoration() = lastSessionRestorer.cancel()
+
     fun selectRuntime(runtimeId: String?) {
         lastSessionRestorer.cancel()
         closeToolDetail()
@@ -3361,13 +3363,17 @@ internal class HostConnection(
     }
 
     private fun notifyNewInteractions(previous: RemoteState, next: RemoteState, allowReplyCompletion: Boolean = true) {
-        for (reply in replyCompletionObserver.observe(previous, next, generation, allowReplyCompletion)) notifier.showReplyCompleted(reply)
+        for (reply in replyCompletionObserver.observe(previous, next, generation, allowReplyCompletion)) {
+            notifier.showReplyCompleted(reply, NotificationOpenTarget.create(pairing, reply.session))
+        }
         val previousIds = previous.conversations.values.flatMap { it.interactions.keys }.toSet()
         for ((runtimeId, conversation) in next.conversations) {
             for (request in conversation.interactions.values) {
                 if (request.requestId !in previousIds) {
                     val runtime = next.runtimes[runtimeId]
-                    notifier.show(runtime?.let(next::runtimeDisplayName) ?: L10n.tr("Orbis 会话"), request)
+                    val sessionId = runtime?.sessionId ?: next.knownRuntimeSessions[runtimeId]
+                    notifier.show(runtime?.let(next::runtimeDisplayName) ?: L10n.tr("Orbis 会话"), request,
+                        NotificationOpenTarget.create(pairing, sessionId))
                 }
             }
         }

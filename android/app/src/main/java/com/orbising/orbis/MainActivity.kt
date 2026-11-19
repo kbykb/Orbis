@@ -3,11 +3,13 @@ package com.orbising.orbis
 import androidx.compose.material3.TextButton
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -208,7 +210,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.text.SimpleDateFormat
@@ -223,6 +224,25 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonArray
 
 class MainActivity : ComponentActivity() {
+    private val remoteModel: RemoteViewModel by viewModels()
+
+    private fun receiveNotification(source: Intent) {
+        if (source.action != OPEN_NOTIFICATION) return
+        source.notificationOpenTarget()?.let(remoteModel::openNotification)
+        // The route belongs to this click, not to later Activity recreation.
+        setIntent(Intent(source).apply { action = null; data = null })
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        receiveNotification(intent)
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) remoteModel.cancelNotificationOpen()
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         AppLocalization.refreshSystemLanguage()
@@ -237,12 +257,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         AppLocalization.configure(this)
         AppAppearance.configure(this)
+        receiveNotification(intent)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         setContent {
             OrbisTheme(manageWindow = false) {
-                val model: RemoteViewModel = viewModel()
+                val model = remoteModel
                 val state by model.state.collectAsStateWithLifecycle()
                 val homeUi by model.homeUi.collectAsStateWithLifecycle()
                 val hosts = homeUi.hosts
@@ -360,6 +381,19 @@ internal fun RemoteApp(
             model.showShortFeedback(L10n.tr("草稿已保留"), "draft:${java.util.UUID.randomUUID()}", FeedbackAction.UNDO)
     }
     val compactDrawerState = rememberDrawerState(DrawerValue.Closed)
+    val notificationNavigation by model.notificationNavigationToken.collectAsStateWithLifecycle()
+    LaunchedEffect(notificationNavigation) {
+        val token = notificationNavigation ?: return@LaunchedEffect
+        if (!model.consumeNotificationNavigation(token)) return@LaunchedEffect
+        launchIntro = null
+        addingHost = false
+        allDownloadsOpen = false
+        newSessionOpen = false
+        newSessionCwd = null
+        draftOrigin = null
+        homeTab = HomeTab.Chat
+        compactDrawerState.close()
+    }
     var runtimeSelecting by remember { mutableStateOf(false) }
     val rootScope = rememberCoroutineScope()
     LaunchedEffect(state.hostId) {
@@ -370,6 +404,7 @@ internal fun RemoteApp(
         }
     }
     fun cancelLaunchIntro() {
+        model.cancelNotificationOpen()
         if (launchIntro == null) return
         launchIntro = null
         // Stop navigation ownership, not the already-dispatched launch request.
@@ -387,6 +422,7 @@ internal fun RemoteApp(
                 permanentDirectory = permanentDirectory,
                 draftOpen = newSessionOpen && state.hostId == newSessionHostId,
                 onToggleDraft = {
+                    model.cancelNotificationOpen()
                     if (newSessionOpen) closeSessionDraft()
                     else { newSessionHostId = state.hostId; newSessionCwd = null; newSessionOpen = true }
                 },
@@ -536,7 +572,7 @@ internal fun RemoteApp(
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         SessionDrawer(homeState, hosts,
                             onSelectHost = { id -> cancelLaunchIntro(); model.selectHost(id) },
-                            onUnpairHost = model::unpair, onAddHost = { addingHost = true },
+                            onUnpairHost = model::unpair, onAddHost = { cancelLaunchIntro(); addingHost = true },
                             onOpenSession = { host, session -> cancelLaunchIntro(); allDownloadsOpen = false; model.openSession(host, session) },
                             onOpenHistory = { host, session -> cancelLaunchIntro(); allDownloadsOpen = false; model.openOfflineSession(host, session) },
                             onNewSession = { host, cwd ->
@@ -559,6 +595,7 @@ internal fun RemoteApp(
                 Box(Modifier.widthIn(max = 720.dp).fillMaxSize()) {
             OrbisPageHost(
                 onBack = {
+                    model.cancelNotificationOpen()
                     when (page) {
                         HomeOverlay.Pairing -> { addingHost = false; model.clearPairingError() }
                         HomeOverlay.OfflineHistory -> model.selectOfflineSession(null)
