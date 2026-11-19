@@ -3006,17 +3006,26 @@ final class OrbisUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 3))
         XCTAssertEqual(composer.value as? String, "选择附件前的草稿")
         app.buttons["发送文件到电脑"].firstMatch.tap()
-        app.buttons["照片"].firstMatch.tap()
+        app.buttons["chat-attach-photos"].firstMatch.tap()
         XCTAssertTrue(app.buttons["文件"].waitForNonExistence(timeout: 3))
         XCTAssertTrue(systemCancel.waitForExistence(timeout: 8))
         capture("attachment-native-photos-picker", app: app)
         systemCancel.tap()
-        app.buttons["发送文件到电脑"].firstMatch.tap()
-        app.buttons["文件"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["照片"].waitForNonExistence(timeout: 3))
-        XCTAssertTrue(systemCancel.waitForExistence(timeout: 8))
-        capture("attachment-native-files-picker", app: app)
-        systemCancel.tap()
+        for attempt in 1...2 {
+            app.buttons["发送文件到电脑"].firstMatch.tap()
+            app.buttons["chat-attach-files"].firstMatch.tap()
+            XCTAssertTrue(app.buttons["照片"].waitForNonExistence(timeout: 3))
+            XCTAssertTrue(systemCancel.waitForExistence(timeout: 8))
+            // Simulator LocalStorage is a stub provider. Verify its rendered
+            // folder state, not just picker chrome; device selection is separate.
+            let localFolder = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage")).firstMatch
+            XCTAssertTrue(localFolder.waitForExistence(timeout: 8), "Local folder must load on presentation \(attempt)")
+            XCTAssertTrue(app.buttons["Orbis, 操作菜单"].exists)
+            XCTAssertTrue(app.staticTexts["文件夹为空"].exists)
+            capture("attachment-local-files-\(attempt)", app: app)
+            systemCancel.tap()
+            XCTAssertTrue(composer.waitForExistence(timeout: 3))
+        }
         XCTAssertEqual(composer.value as? String, "选择附件前的草稿")
     }
 

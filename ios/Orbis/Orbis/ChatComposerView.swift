@@ -166,7 +166,6 @@ struct ChatComposerView: View, Equatable {
     @State private var selectedCommand: String?
     @State private var deliveryChoices = false
     @State private var permissionsOpen = false
-    @State private var attachmentChoices = false
     @State private var filePickerOpen = false
     @State private var photoPickerOpen = false
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -288,12 +287,7 @@ struct ChatComposerView: View, Equatable {
             AttachmentStrip(actions: actions, tasks: facts.attached, preparing: facts.preparing || preparingPhotos)
             if slash { SlashPickerView(commands: facts.commands, selected: $selectedCommand, input: draft, onHistory: onHistory).padding(.top, 10) }
             ChatComposerRowLayout {
-                OrbisIconButton(symbol: foldReading && focused ? "keyboard.chevron.compact.down" : "paperclip",
-                                label: L10n.tr(foldReading && focused ? "收起键盘" : "发送文件到电脑"), tint: accent) {
-                    if foldReading && focused { composerFocus.focused = false; return }
-                    guard actions.isCurrent else { return }
-                    composerFocus.focused = false; attachmentChoices = true
-                }.disabled(!(foldReading && focused) && (!facts.canSend || facts.preparing || preparingPhotos || attachments.count >= 10))
+                attachmentButton
                 OrbisDraftEditor(text: draft,
                                  focused: Binding(get: { focused }, set: { if composerFocus.focused != $0 { composerFocus.focused = $0 } }),
                                  placeholder: L10n.tr("发给 {0}，/ 命令", agentTitle(kind)),
@@ -322,32 +316,20 @@ struct ChatComposerView: View, Equatable {
                 }
             }.padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 12)
         }.padding(.top, 4).background(p.base)
-            .confirmationDialog(L10n.tr("添加附件"), isPresented: $attachmentChoices, titleVisibility: .hidden) {
-                Button(L10n.tr("照片")) {
-                    let capacity = max(0, 10 - attachments.count)
-                    guard actions.isCurrent, capacity > 0 else { return }
-                    photoSelection = ChatFileSelection(actions: actions, capacity: capacity)
-                    selectedPhotos = []; photoPickerOpen = true
-                }.accessibilityIdentifier("chat-attach-photos")
-                Button(L10n.tr("文件")) {
-                    guard actions.isCurrent else { return }
-                    fileSelection = ChatFileSelection(actions: actions, capacity: max(0, 10 - attachments.count))
-                    filePickerOpen = true
-                }.accessibilityIdentifier("chat-attach-files")
-                Button(L10n.tr("取消"), role: .cancel) {}
-            }
             .photosPicker(isPresented: $photoPickerOpen, selection: $selectedPhotos,
                           maxSelectionCount: max(1, photoSelection?.capacity ?? 10), matching: .images,
                           preferredItemEncoding: .compatible)
-            .fileImporter(isPresented: $filePickerOpen, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-                guard let selection = fileSelection else { return }
-                fileSelection = nil
-                switch result {
-                case .success(let urls): selection.actions.upload(urls, capacity: selection.capacity)
-                case .failure(let error): selection.actions.uploadFailed(error.localizedDescription)
-                }
+            .sheet(isPresented: $filePickerOpen, onDismiss: { fileSelection = nil }) {
+                AttachmentFilePicker(onPick: { urls in
+                    let selection = fileSelection
+                    filePickerOpen = false
+                    fileSelection = nil
+                    if let selection { selection.actions.upload(urls, capacity: selection.capacity) }
+                }, onCancel: {
+                    filePickerOpen = false
+                    fileSelection = nil
+                })
             }
-            .fileDialogDefaultDirectory(FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first)
             .orbisBottomSheet(isPresented: $permissionsOpen) {
                 PermissionsView(target: target, runtime: actions.runtime ?? fallbackRuntime).orbisSheet([.large])
             }
@@ -364,6 +346,34 @@ struct ChatComposerView: View, Equatable {
             }
             .onDisappear { if actions.ownsRuntime, let selectedCommand, target.runtimeId != nil { actions.cancelMenuOptions(selectedCommand) } }
             .onChange(of: runtime.status) { _, status in if status != "running" { deliveryChoices = false } }
+    }
+
+    @ViewBuilder private var attachmentButton: some View {
+        if foldReading && composerFocus.focused {
+            OrbisIconButton(symbol: "keyboard.chevron.compact.down", label: L10n.tr("收起键盘"), tint: accent) {
+                composerFocus.focused = false
+            }
+        } else {
+            // The app-owned menu does not present a system modal. A picker can
+            // open directly from it without racing a confirmation dialog's dismissal.
+            OrbisMenuIconButton(symbol: "paperclip", label: L10n.tr("发送文件到电脑"), tint: accent) {
+                composerFocus.focused = false
+                return [
+                    OrbisMenuItem(title: L10n.tr("照片"), symbol: "photo", identifier: "chat-attach-photos") {
+                        let capacity = max(0, 10 - attachments.count)
+                        guard actions.isCurrent, capacity > 0 else { return }
+                        photoSelection = ChatFileSelection(actions: actions, capacity: capacity)
+                        selectedPhotos = []; photoPickerOpen = true
+                    },
+                    OrbisMenuItem(title: L10n.tr("文件"), symbol: "folder", identifier: "chat-attach-files") {
+                        let capacity = max(0, 10 - attachments.count)
+                        guard actions.isCurrent, capacity > 0 else { return }
+                        fileSelection = ChatFileSelection(actions: actions, capacity: capacity)
+                        filePickerOpen = true
+                    }
+                ]
+            }.disabled(!facts.canSend || facts.preparing || preparingPhotos || attachments.count >= 10)
+        }
     }
 
     private func importPhotos() async {
