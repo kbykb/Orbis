@@ -301,6 +301,7 @@ export class HostService {
   #toolDiagnosticTimer: ReturnType<typeof setInterval> | undefined;
   readonly #toolTraffic = new Map<string, Record<"summaryJsonBytes" | "bodyJsonBytes" | "detailJsonBytes" | "readRequests" | "readFailures" | "gapResponses", number>>();
   #relay: HostRelayClient | undefined;
+  #relayQueueRecovery: Promise<void> | undefined;
   #loopback: HostLoopbackServer | undefined;
   #lan: HostLanServer | undefined;
   readonly #spawner: SessionSpawner;
@@ -1897,6 +1898,9 @@ export class HostService {
       // 见 #attachRelaySink）。这种事默认是无声的，而它恰好是「手机在等 HS2、Host 这边
       // 一点痕迹都没有」的成因，所以必须留一行日志。
       const link = this.#requireLink(deviceId);
+      // Queue pressure can retire just this E2E path while the shared Relay
+      // transport stays connected. A phone's fresh HS1 still needs an outlet.
+      if (path === "relay") this.#attachRelaySink(link);
       if (!link.handle(path, envelope)) {
         this.#options.log?.(`${path} 路径没有出口，丢弃来自 ${deviceId} 的 ${envelope.hdr.k} 帧`);
       }
@@ -3204,6 +3208,7 @@ export class HostService {
           `[queue] ${path}/${rejection.channel} 出站队列达到上限（${rejection.queuedBytes}/${rejection.queueLimitBytes} 字节，` +
           `请求 ${rejection.requestedBytes} 字节）：摘除路径并等待重新握手`,
         );
+        if (path === "relay") this.#recoverRelayQueue();
       },
       ...(this.#options.probeIntervalMs === undefined ? {} : { probeIntervalMs: this.#options.probeIntervalMs }),
       ...(this.#options.bulkBytesPerSecond === undefined
@@ -3280,6 +3285,26 @@ export class HostService {
     sink.channelBacklog = (channel) => this.#relay?.bufferedAmountFor(channel) ?? 0;
     sink.supportsHistoryStreams = () => this.#relay?.supportsHistoryStreams === true;
     link.attach("relay", sink);
+  }
+
+  #recoverRelayQueue(): void {
+    if (this.#relayQueueRecovery || this.#providerFactsClosing || this.#relay?.state !== "connected") return;
+    // Admission callbacks run before DeviceLink.detach. Leave that stack first,
+    // and share one recovery across devices rejected during the same backlog.
+    // Re-registering uses the existing Relay lifecycle: host.online makes the
+    // released phones rehandshake; LAN sessions and local agents remain alive.
+    this.#relayQueueRecovery = Promise.resolve().then(async () => {
+      if (this.#providerFactsClosing || this.#relay?.state !== "connected") return;
+      this.#options.log?.("[queue] 重新登记中继连接，通知手机重建端到端会话");
+      const relay = this.#relay;
+      await relay.stop();
+      if (this.#providerFactsClosing || this.#relay !== relay) return;
+      await relay.start();
+    }).catch((error: unknown) => {
+      this.recordDiagnostic({ scope: "host", agentKind: null, sessionId: null, category: "transport",
+        severity: "warning", message: "Relay queue recovery failed", detail: { error: describeError(error) } });
+      this.#options.log?.(`[queue] 中继重新登记失败，后续使用现有重连流程：${describeError(error)}`);
+    }).finally(() => { this.#relayQueueRecovery = undefined; });
   }
 
   #persist(): void {

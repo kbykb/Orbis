@@ -57,6 +57,7 @@ import { createBusinessRelayServer as createRelayServer, relayBusinessHostOption
 
 import { HostService, channelForDeviceMessage } from "./host-service.js";
 import { HostRelayClient } from "./relay-client.js";
+import * as relaySocket from "./relay-socket.js";
 import * as pushRelayConfig from "./config.js";
 import type { ActivePathChange } from "./device-link.js";
 import { CodexAppServer } from "./codex-daemon.js";
@@ -407,6 +408,21 @@ class TestDevice {
   async openChannel(kind: PathKind, pskRoot: Buffer, room: string, hostId: string): Promise<void> {
     if (kind === "relay") this.#initialLanRefreshReplies += 1;
     await this.#require(kind).openChannel(pskRoot, room, hostId, this.deviceId);
+  }
+
+  /** Released iOS/Android restart E2E on host.online without reopening their socket. */
+  followRelayHostLifecycle(pskRoot: Buffer, hostId: string): { socket: WebSocket; handshakes: Promise<void>[]; stop: () => void } {
+    const socket = this.#require("relay").socket;
+    const handshakes: Promise<void>[] = [];
+    const receive = (raw: RawData): void => {
+      const message = JSON.parse(raw.toString()) as { type: string; hostId?: string };
+      if (message.type !== "host.online" || message.hostId !== hostId) return;
+      const handshake = this.openChannel("relay", pskRoot, hostId, hostId);
+      handshakes.push(handshake);
+      void handshake.catch(() => undefined);
+    };
+    socket.on("message", receive);
+    return { socket, handshakes, stop: () => socket.off("message", receive) };
   }
 
   /** Reference-phone handover: prepare unauthed, join old socket, then authenticate with the same identity. */
@@ -1786,6 +1802,113 @@ describe("host end-to-end over relay", () => {
     // 通道真的又能干活：一条业务消息走通整条路。
     host.sendData(device.deviceId, Buffer.from("抖动之后还能说话", "utf8"), "ctl");
     await expect(device.receiveData()).resolves.toBe("抖动之后还能说话");
+  });
+
+  it("recovers full Relay queues through host.online and backoff, keeping phone sockets, LAN and local runtimes alive", async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-relay-queue-recovery-"));
+    relay = await startRelay(stateDir);
+    const received: string[] = [];
+    const states: string[] = [];
+    const logs: string[] = [];
+    host = await HostService.create({ relayUrl: relay.url, ...relayBusinessHostOptions(relay.url), credential: "runtime-secret",
+      adminToken: "owner-secret", stateDir, lanPort: 0, probeIntervalMs: 0,
+      onData: (_id, payload) => received.push(payload.toString()), onStateChange: state => states.push(state), log: line => logs.push(line) });
+    await host.start();
+    const first = await pairDevice({ relay, host }); device = first.device;
+    await device.openChannel("relay", first.pskRoot, first.payload.hostId, first.payload.hostId);
+    await readMatching(device, message => message.type === "device.path");
+    const lan = await pairDevice({ relay, host });
+    const otherRelay = await pairDevice({ relay, host });
+    let firstLifecycle: ReturnType<TestDevice["followRelayHostLifecycle"]> | undefined;
+    let otherLifecycle: ReturnType<TestDevice["followRelayHostLifecycle"]> | undefined;
+    const restart = vi.spyOn(HostRelayClient.prototype, "start");
+    const backlog = vi.spyOn(HostRelayClient.prototype, "bufferedAmountFor");
+    const prepare = vi.spyOn(relaySocket, "prepareRelaySocket");
+    try {
+      await lan.device.openLanPath(`ws://127.0.0.1:${host.lan!.port}/v1/lan`);
+      await lan.device.openChannel("lan", lan.pskRoot, lan.payload.hostId, lan.payload.hostId);
+      await readMatching(lan.device, message => message.type === "device.path" && message.path === "lan");
+      await otherRelay.device.openChannel("relay", otherRelay.pskRoot, otherRelay.payload.hostId, otherRelay.payload.hostId);
+      await readMatching(otherRelay.device, message => message.type === "device.path");
+      const descriptor = host.loopback!.descriptor!;
+      runtime = await TestRuntime.connect({ url: descriptor.url, token: descriptor.token,
+        metadata: { runtimeId: "pi-queue-recovery", name: "running task", cwd: stateDir, status: "running", sessionId: "s" } });
+      await runtime.next();
+      await readMatching(device, message => message.type === "runtime.online");
+      await readMatching(otherRelay.device, message => message.type === "runtime.online");
+      await readMatching(lan.device, message => message.type === "runtime.online");
+      firstLifecycle = device.followRelayHostLifecycle(first.pskRoot, first.payload.hostId);
+      otherLifecycle = otherRelay.device.followRelayHostLifecycle(otherRelay.pskRoot, otherRelay.payload.hostId);
+      const payload = Buffer.from(JSON.stringify({ type: "agent.state.snapshot", domains: [{ domain: "records", value: "x".repeat(1_715_000) }] }));
+      backlog.mockReturnValue(2 * 1024 * 1024);
+      prepare.mockRejectedValueOnce(new Error("temporary recovery connection failure"));
+      // Both devices reject in the same turn. The existing 32 MiB production
+      // budget and real encryption/fragment queues run unchanged.
+      for (const target of [device, otherRelay.device]) for (let i = 0; i < 15; i++) host.sendData(target.deviceId, payload, "msg");
+      expect(logs.filter(line => line.includes("出站队列达到上限"))).toHaveLength(2);
+      expect(restart).not.toHaveBeenCalled();
+      host.sendData(lan.device.deviceId, Buffer.from("LAN stays available"), "ctl");
+      backlog.mockRestore();
+      await expect(lan.device.receiveData()).resolves.toBe("LAN stays available");
+      await vi.waitFor(() => {
+        expect(firstLifecycle!.handshakes).toHaveLength(1);
+        expect(otherLifecycle!.handshakes).toHaveLength(1);
+      }, { timeout: 5_000 });
+      await Promise.all([...firstLifecycle.handshakes, ...otherLifecycle.handshakes]);
+      await readMatching(device, message => message.type === "device.path");
+      await readMatching(otherRelay.device, message => message.type === "device.path");
+      expect(restart).toHaveBeenCalledTimes(1);
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(logs.some(line => line.includes("中继重新登记失败"))).toBe(true);
+      expect(states).toEqual(["connecting", "connected", "closed", "connecting", "reconnecting", "connecting", "connected"]);
+      expect(firstLifecycle.socket.readyState).toBe(WebSocket.OPEN);
+      expect(otherLifecycle.socket.readyState).toBe(WebSocket.OPEN);
+      expect(runtime.socket.readyState).toBe(WebSocket.OPEN);
+      expect(lan.device.active).toBe("lan");
+      host.sendData(device.deviceId, Buffer.from("Relay recovered"), "msg");
+      await expect(device.receiveData()).resolves.toBe("Relay recovered");
+      device.sendData("phone reply after recovery");
+      lan.device.sendData("LAN reply after recovery");
+      await vi.waitFor(() => {
+        expect(received).toHaveLength(2);
+        expect(received).toEqual(expect.arrayContaining(["phone reply after recovery", "LAN reply after recovery"]));
+      });
+    } finally {
+      firstLifecycle?.stop(); otherLifecycle?.stop();
+      restart.mockRestore(); backlog.mockRestore(); prepare.mockRestore(); lan.device.close(); otherRelay.device.close();
+    }
+  }, 20_000);
+
+  it.each(["scheduled", "transport_closed"] as const)("does not restart Relay when Host stops during queue recovery (%s)", async stage => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-queue-recovery-stop-"));
+    relay = await startRelay(stateDir);
+    host = await HostService.create({ relayUrl: relay.url, ...relayBusinessHostOptions(relay.url), credential: "runtime-secret",
+      adminToken: "owner-secret", stateDir, reconnect: false, lan: false, probeIntervalMs: 0 });
+    await host.start();
+    const paired = await pairDevice({ relay, host }); device = paired.device;
+    await device.openChannel("relay", paired.pskRoot, paired.payload.hostId, paired.payload.hostId);
+    await readMatching(device, message => message.type === "device.path");
+    const restart = vi.spyOn(HostRelayClient.prototype, "start");
+    const originalStop = HostRelayClient.prototype.stop;
+    const stop = vi.spyOn(HostRelayClient.prototype, "stop");
+    let closeComplete!: () => void;
+    let releaseRecovery!: () => void;
+    const closed = new Promise<void>(resolve => { closeComplete = resolve; });
+    const released = new Promise<void>(resolve => { releaseRecovery = resolve; });
+    if (stage === "transport_closed") stop.mockImplementationOnce(async function(this: HostRelayClient) {
+      await originalStop.call(this);
+      closeComplete();
+      await released;
+    });
+    try {
+      // A single payload exceeds the unchanged 32 MiB wire queue budget.
+      host.sendData(device.deviceId, Buffer.alloc(25 * 1024 * 1024), "msg");
+      if (stage === "transport_closed") await closed;
+      await host.stop(); host = undefined;
+      releaseRecovery();
+      await Promise.resolve();
+      expect(restart).not.toHaveBeenCalled();
+    } finally { releaseRecovery(); restart.mockRestore(); stop.mockRestore(); }
   });
 
   // FT-G09-WIRE: records only follow active interests; the explicit field report
