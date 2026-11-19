@@ -59,7 +59,7 @@ import { HostService, channelForDeviceMessage } from "./host-service.js";
 import { HostRelayClient } from "./relay-client.js";
 import * as relaySocket from "./relay-socket.js";
 import * as pushRelayConfig from "./config.js";
-import type { ActivePathChange } from "./device-link.js";
+import { DeviceLink, type ActivePathChange } from "./device-link.js";
 import { CodexAppServer } from "./codex-daemon.js";
 import { CodexRuntime } from "./codex-runtime.js";
 import { DshRuntime } from "./dsh-runtime.js";
@@ -2151,6 +2151,115 @@ describe("host end-to-end over relay", () => {
     expect((recovered.domains as AgentStateDomainSnapshot[])[0]!.value).toEqual(reconstructed);
     expect((recovered.domains as AgentStateDomainSnapshot[])[0]!.delta).toBeUndefined();
   });
+
+  it.each(["legacy", "compact-v2"] as const)("coalesces queued %s state over E2E without losing captions, replies or tool results", async format => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-state-drain-wire-")); relay = await startRelay(stateDir);
+    host = await HostService.create({ relayUrl: relay.url, ...relayBusinessHostOptions(relay.url), credential: "runtime-secret", adminToken: "owner-secret",
+      stateDir, reconnect: false, lan: false, probeIntervalMs: 0 }); await host.start();
+    const paired = await pairDevice({ relay, host }); device = paired.device;
+    await device.openChannel("relay", paired.pskRoot, paired.payload.hostId, paired.payload.hostId);
+    await readMatching(device, message => message.type === "device.path");
+    const descriptor = host.loopback!.descriptor!;
+    runtime = await TestRuntime.connect({ url: descriptor.url, token: descriptor.token,
+      metadata: { runtimeId: "pi-state-drain", sessionId: "drain", name: "Pi", cwd: stateDir, status: "idle" } });
+    await runtime.next(); await readMatching(device, message => message.type === "runtime.online");
+    const commands = Array.from({ length: 160 }, (_, i) => ({ name: `command-${i}-${"c".repeat(80)}`, source: "builtin" as const }));
+    const tree = { name: "tree", source: "builtin" as const, argument: { kind: "tree" as const, required: true,
+      options: Array.from({ length: 800 }, (_, i) => ({ value: `entry-${i}`, label: `History ${i} ${"x".repeat(140)}`,
+        tree: { parentId: i ? `entry-${i - 1}` : null, entryType: "message", role: "assistant", defaultHidden: false,
+          isCurrent: i === 799, isOnActivePath: true } })) } };
+    let sequence = 0;
+    const capabilities = (removed: number): Extract<RuntimeEvent, { type: "runtime.capabilities" }> =>
+      ({ type: "runtime.capabilities", capabilities: { commands: [tree, ...commands.slice(removed)] } });
+    runtime.publish(++sequence, capabilities(0));
+    await readMatching(device, message => (message.event as RuntimeEvent | undefined)?.type === "runtime.capabilities");
+    const requestId = "drain-subscription";
+    device.sendData(JSON.stringify({ type: "agent.state.request", protocolVersion: PROTOCOL_VERSION, requestId,
+      scope: "agent", runtimeId: "pi-state-drain", domains: ["execution", "capabilities"], subscribe: true,
+      ...(format === "compact-v2" ? { stateFormat: format } : {}) }));
+    let initial: AgentStateDomainSnapshot | undefined;
+    let execution: unknown;
+    while (!initial) {
+      const message = await readMatching(device, item => item.requestId === requestId);
+      const rows = message.domains as AgentStateDomainSnapshot[];
+      initial = rows.find(row => row.domain === "capabilities");
+      const currentExecution = rows.find(row => row.domain === "execution");
+      if (currentExecution) execution = currentExecution.value;
+    }
+    const hasExecutionPhase = (message: Record<string, unknown>, phase: string): boolean => {
+      if (message.requestId !== requestId || message.update !== true) return false;
+      const row = (message.domains as AgentStateDomainSnapshot[]).find(item => item.domain === "execution");
+      if (!row) return false;
+      execution = row.delta ? applyStateDelta(execution, row.delta.operations) : row.value;
+      return (execution as { phase?: string }).phase === phase;
+    };
+    const sent = vi.spyOn(DeviceLink.prototype, "send");
+    const backlog = vi.spyOn(HostRelayClient.prototype, "bufferedAmountFor").mockImplementation(channel => channel === "msg" ? 2 * 1024 * 1024 : 0);
+    const updates = (): Array<{ payload: Uint8Array; row: AgentStateDomainSnapshot }> => sent.mock.calls.flatMap(([payload, , source]) => {
+      if (source?.type !== "agent.state.snapshot" || source.runtimeId !== "pi-state-drain" || source.domains !== "capabilities") return [];
+      const message = JSON.parse(Buffer.from(payload).toString()) as Record<string, unknown>;
+      return message.update === true ? [{ payload, row: (message.domains as AgentStateDomainSnapshot[])[0]! }] : [];
+    });
+    const caption = { messageId: "caption", role: "system" as const, timestamp: 1, content: [{ type: "text" as const, text: "正在核对最新状态" }] };
+    const answer = { messageId: "answer", role: "assistant" as const, timestamp: 2, content: [{ type: "text" as const, text: "正文完整保留。".repeat(200) }] };
+    const toolSummary = createToolSummary({ tool: { agent: { hostId: paired.payload.hostId, agentKind: "pi", sessionId: "drain" }, toolCallId: "read-result" },
+      toolName: "read", order: 0, phase: "finished", contents: [] });
+    const toolResult = { messageId: "tool-result", role: "tool" as const, timestamp: 3, content: [], toolCallId: "read-result", toolName: "read", toolSummary };
+    const businessEvents: RuntimeEvent[] = [
+      { type: "message.started", message: caption }, { type: "message.finished", message: caption },
+      { type: "message.started", message: answer }, { type: "message.finished", message: answer },
+      { type: "message.finished", message: toolResult },
+    ];
+    try {
+      // Every status crosses the real loopback and E2E sockets before the next
+      // revision is published, so these changes cannot coalesce in one microtask.
+      for (let removed = 1; removed <= 12; removed++) {
+        runtime.publish(++sequence, capabilities(removed));
+        const status = removed % 2 ? "running" : "idle";
+        runtime.publish(++sequence, { type: "runtime.status", status });
+        await readMatching(device, message => hasExecutionPhase(message, status));
+      }
+      expect(updates()).toHaveLength(1);
+      const first = updates()[0]!;
+      if (format === "compact-v2") {
+        expect(first.row.delta?.baseRevision).toBe(initial.revision);
+        expect(first.row.value).toBeNull();
+      }
+      for (const event of businessEvents) runtime.publish(++sequence, event);
+      runtime.publish(++sequence, { type: "runtime.status", status: "running" });
+      // ctl execution updates still arrive while every msg frame is gated.
+      await readMatching(device, message => hasExecutionPhase(message, "running"));
+      expect(updates()).toHaveLength(1);
+      backlog.mockRestore();
+      const received: RuntimeEvent[] = [];
+      const capabilityRows: AgentStateDomainSnapshot[] = [];
+      while (capabilityRows.length < 2 || received.length < businessEvents.length) {
+        const message = await device.receiveMessage();
+        if (message.requestId === requestId && message.update === true)
+          capabilityRows.push(...(message.domains as AgentStateDomainSnapshot[]).filter(row => row.domain === "capabilities"));
+        const event = message.event as RuntimeEvent | undefined;
+        if (event && (event.type === "message.started" || event.type === "message.finished") && ["caption", "answer", "tool-result"].includes(event.message.messageId))
+          received.push(event);
+      }
+      expect(received).toEqual(businessEvents);
+      expect(updates()).toHaveLength(2);
+      expect(capabilityRows.map(row => row.revision)).toEqual([initial.revision + 1, initial.revision + 12]);
+      let value = initial.value;
+      for (const row of capabilityRows) {
+        if (row.delta) {
+          expect(row.delta.baseRevision).toBe(row === capabilityRows[0] ? initial.revision : capabilityRows[0]!.revision);
+          value = applyStateDelta(value, row.delta.operations);
+        } else value = row.value;
+      }
+      expect(Object.keys(value as object)).toHaveLength(149);
+      expect(value).not.toHaveProperty(commands[11]!.name);
+      expect(value).toHaveProperty(commands[12]!.name);
+      const bytes = updates().reduce((sum, item) => sum + item.payload.byteLength, 0);
+      const originalBytes = Buffer.byteLength(JSON.stringify(initial.value));
+      expect(bytes).toBeLessThan(originalBytes * (format === "compact-v2" ? 1 : 3));
+      console.info("state drain wire", { format, changes: 12, snapshots: updates().length, bytes, originalBytes });
+    } finally { backlog.mockRestore(); sent.mockRestore(); }
+  }, 20_000);
 
   // FT-G11-WIRE: source invalidation publishes without another phone poll;
   // a lost publication then reconciles the actual old applied revision.

@@ -118,6 +118,7 @@ function deviceRecord(pskRoot: Buffer): DeviceRecord {
 function harness(input: { probeIntervalMs?: number; pskRoot: Buffer; bulkQueueLimitBytes?: number;
   relayHistoryMode?: "shared" | "background"; fiveStreams?: boolean;
   msgQueueLimitBytes?: number;
+  onMessageQueueDrained?: () => void;
   onQueueDiagnostic?: (kind: PathKind, sample: OutboundQueueDiagnostic) => void }) {
   const outbox: { kind: PathKind; envelope: EnvelopeV2 }[] = [];
   const payloads: string[] = [];
@@ -137,6 +138,7 @@ function harness(input: { probeIntervalMs?: number; pskRoot: Buffer; bulkQueueLi
     ...(input.bulkQueueLimitBytes === undefined ? {} : { bulkQueueLimitBytes: input.bulkQueueLimitBytes }),
     ...(input.msgQueueLimitBytes === undefined ? {} : { msgQueueLimitBytes: input.msgQueueLimitBytes }),
     ...(input.onQueueDiagnostic === undefined ? {} : { onQueueDiagnostic: input.onQueueDiagnostic }),
+    ...(input.onMessageQueueDrained === undefined ? {} : { onMessageQueueDrained: input.onMessageQueueDrained }),
     onPayload: (payload) => payloads.push(payload.toString("utf8")),
     // 生效路径的宣布有两个来源：握手完成（`onSessionReady`）与之后换路（`onActivePathChange`）。
     // 这个装置关心的是「宣布过哪些路径」，所以两条都记进来。
@@ -208,6 +210,32 @@ function harness(input: { probeIntervalMs?: number; pskRoot: Buffer; bulkQueueLi
 
   return { link, outbox, payloads, changes, sessions, rttUpdates, attach, handshake, probeRoundTrip, peer, shift, messagesSent };
 }
+
+it("defers drain publication until all slices are enqueued and ignores retired paths", async () => {
+  vi.useFakeTimers();
+  let blocked = false;
+  const drained = vi.fn();
+  const h = harness({ pskRoot: randomKey(), onMessageQueueDrained: drained });
+  h.attach("relay", () => blocked ? 1_000_000 : 0); h.handshake("relay"); h.outbox.length = 0;
+  try {
+    expect(h.link.isStateWritable).toBe(true);
+    h.link.send(Buffer.alloc(128 * 1024), "msg");
+    expect(drained).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(drained).toHaveBeenCalledTimes(1);
+    blocked = true;
+    h.link.send(Buffer.from("waiting"), "msg");
+    expect(h.link.isStateWritable).toBe(false);
+    blocked = false;
+    vi.advanceTimersByTime(1);
+    expect(h.link.isStateWritable).toBe(true);
+    expect(drained).toHaveBeenCalledTimes(1);
+    h.link.detach("relay");
+    await Promise.resolve();
+    expect(h.link.isStateWritable).toBe(false);
+    expect(drained).toHaveBeenCalledTimes(1);
+  } finally { h.link.close(); vi.useRealTimers(); }
+});
 
 describe("Relay history isolation", () => {
   it("negotiates independent history and catchup, preserves priority, encrypted contents and completion budgets", async () => {

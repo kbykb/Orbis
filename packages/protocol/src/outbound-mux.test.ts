@@ -5,6 +5,28 @@ import { OutboundChannelMux, type OutboundQueueDiagnostic } from "./outbound-mux
 /** 造一个长度恰好是 `bytes` 的「帧」——测试里用它的长度当字节数，避免声明与事实不符。 */
 const frame = (bytes: number, tag = ""): string => tag.padEnd(bytes, "x").slice(0, bytes);
 
+it("wakes state publishers only after message writes drain, never on stop or abandoned writes", () => {
+  let backlog = 1_000_000;
+  const drained = vi.fn();
+  const written: string[] = [];
+  const mux = new OutboundChannelMux<string>({ write: text => { written.push(text); }, backlog: () => backlog,
+    onMessageQueueDrained: drained });
+  try {
+    mux.enqueue("msg", "state", 5); mux.enqueue("history", "history", 7);
+    mux.enqueue("bulk", "file", 4); mux.enqueue("ctl", "receipt", 7);
+    expect(drained).not.toHaveBeenCalled();
+    backlog = 0; mux.notifyDrained();
+    expect(written).toEqual(["receipt", "state", "history", "file"]);
+    expect(drained).toHaveBeenCalledTimes(1);
+    backlog = 1_000_000; mux.enqueue("msg", "cancelled", 9); mux.stop();
+    expect(drained).toHaveBeenCalledTimes(1);
+  } finally { mux.stop(); }
+  const failed = new OutboundChannelMux<string>({ write: () => { throw Error("closed"); }, maxWriteAttempts: 1,
+    onMessageQueueDrained: drained });
+  failed.enqueue("msg", "failed", 6); failed.stop();
+  expect(drained).toHaveBeenCalledTimes(1);
+});
+
 describe("NQ-15 bulk pacing", () => {
   // Delaying sealed bulk must preserve every frame and its FIFO, while control
   // and chat continue immediately and the limiter does not busy-poll at 1 ms.

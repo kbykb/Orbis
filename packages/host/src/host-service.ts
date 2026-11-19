@@ -924,10 +924,11 @@ export class HostService {
       runtimeId => this.#runtimesSnapshot().find(runtime => runtime.runtimeId === runtimeId));
     this.#toolIngestion = new ToolInventoryIngestion(this.#toolInventory);
     const project = (deviceId: string, scope: StateScope, domain: string, value: unknown) => this.#projectHostDomain(deviceId, scope, domain, value);
-    this.#agentStateSubscriptions = new AgentStateSubscriptions(agentStateRegistry, (deviceId, message) => this.#sendToDevice(deviceId, message), project);
+    const canPublishState = (deviceId: string) => this.#links.get(deviceId)?.isStateWritable === true;
+    this.#agentStateSubscriptions = new AgentStateSubscriptions(agentStateRegistry, (deviceId, message) => this.#sendToDevice(deviceId, message), project, canPublishState);
     this.#compactState = new CompactStateModel(agentStateRegistry,
       value => legacyHostDomain("catalog", value, catalog => this.#hostStateFacts.hiddenCatalog(catalog, DSH_DESKTOP_KIND)));
-    this.#compactStateSubscriptions = new AgentStateSubscriptions(this.#compactState.registry, (deviceId, message) => this.#sendToDevice(deviceId, message), project);
+    this.#compactStateSubscriptions = new AgentStateSubscriptions(this.#compactState.registry, (deviceId, message) => this.#sendToDevice(deviceId, message), project, canPublishState);
     for (const codex of [options.codexRuntime, options.codexDesktopRuntime]) {
       if (codex !== undefined) this.#attachCodexBackend(codex);
     }
@@ -1339,7 +1340,7 @@ export class HostService {
   }
 
   async #handleProviderRequest(deviceId: string, request: ProviderRequest): Promise<void> {
-    const send = (message: object): void => this.#sendJsonToDevice(deviceId, message, "ctl");
+    const send = (message: object): void => { this.#sendJsonToDevice(deviceId, message, "ctl"); };
     try {
       const manager = this.#options.providers;
       if (!manager) throw new ProviderError("此 Host 尚未启用供应商管理，请升级并重启 Host");
@@ -2919,22 +2920,23 @@ export class HostService {
     this.#fieldTraffic.record(payload, { backend: runtime?.kind === "agent" ? runtime.key.agentKind : "host", messageType: type, reason });
   }
 
-  #sendToDevice(deviceId: string, message: RelayToDeviceMessage): void {
-    this.#sendJsonToDevice(deviceId, message, channelForDeviceMessage(message));
+  #sendToDevice(deviceId: string, message: RelayToDeviceMessage): boolean {
+    return this.#sendJsonToDevice(deviceId, message, channelForDeviceMessage(message));
   }
 
-  #sendJsonToDevice(deviceId: string, original: object, channel: EnvelopeChannel): void {
+  #sendJsonToDevice(deviceId: string, original: object, channel: EnvelopeChannel): boolean {
     const link = this.#links.get(deviceId);
-    if (link === undefined) return;
+    if (link === undefined) return false;
     const message = this.#visibleTo(deviceId, original);
-    if (message === undefined) return;
+    if (message === undefined) return false;
     try {
       // `send` 走当前生效路径；没有可用路径时返回 false，此时消息就是发不出去，
       // 也不该假装发出去了——上层会靠重连后的 `device.ready` 重新对齐。
       const payload = this.#encodeForDevice(deviceId, message);
-      link.send(payload, channel, outboundQueueSource(message, payload.byteLength));
+      return link.send(payload, channel, outboundQueueSource(message, payload.byteLength));
     } catch (error) {
       this.#options.onDeviceError?.(deviceId, error);
+      return false;
     }
   }
 
@@ -3209,6 +3211,10 @@ export class HostService {
           `请求 ${rejection.requestedBytes} 字节）：摘除路径并等待重新握手`,
         );
         if (path === "relay") this.#recoverRelayQueue();
+      },
+      onMessageQueueDrained: () => {
+        this.#agentStateSubscriptions.notifyWritable(deviceId);
+        this.#compactStateSubscriptions.notifyWritable(deviceId);
       },
       ...(this.#options.probeIntervalMs === undefined ? {} : { probeIntervalMs: this.#options.probeIntervalMs }),
       ...(this.#options.bulkBytesPerSecond === undefined

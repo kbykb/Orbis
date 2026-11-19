@@ -127,6 +127,8 @@ export type DeviceLinkOptions = {
   onQueueDiagnostic?: (kind: PathKind, sample: OutboundQueueDiagnostic) => void;
   /** 普通出站队列封帧前拒绝，记录后摘除当前路径以触发重新握手。 */
   onQueueAdmissionRejected?: (kind: PathKind, rejection: QueueAdmissionRejection) => void;
+  /** The active message queue drained; called in a microtask, never inside fragment enqueue. */
+  onMessageQueueDrained?: () => void;
   /** 一条入站帧被判重放丢弃（限频后回调）：水位线错位的唯一可见信号。 */
   onStaleFrame?: (kind: PathKind, info: { channel: string; n: number; last: number }) => void;
   /**
@@ -243,6 +245,7 @@ export class DeviceLink {
   #syncBytes = 0;
   #toolBytes = 0;
   #syncRejection: SessionSyncRejection | undefined;
+  #messageDrainScheduled = false;
   /**
    * 入站片的重组缓冲（见 `piece.ts`）。
    *
@@ -353,6 +356,9 @@ export class DeviceLink {
   /** 一条路径的出站多路复用器。出口是**动态**读的——理由见 `attach`。 */
   #createMux(kind: PathKind): OutboundChannelMux<EnvelopeV2> {
     return new OutboundChannelMux<EnvelopeV2>({
+      onMessageQueueDrained: () => {
+        if (this.#selector.active === kind) this.#notifyMessageQueueDrained();
+      },
       ...(this.#options.onQueueDiagnostic === undefined ? {} : {
         onQueueDiagnostic: (sample: OutboundQueueDiagnostic) => this.#options.onQueueDiagnostic?.(kind, sample),
       }),
@@ -517,6 +523,23 @@ export class DeviceLink {
    */
   send(payload: Uint8Array, channel: EnvelopeChannel, source?: OutboundQueueSource): boolean {
     return this.#sendSealed("data", payload, this.#selector.active, channel, source);
+  }
+
+  /** Allow one state publication to enter the existing drain loop. Further versions
+   * remain as dirty domain names until this active path's messages have drained. */
+  get isStateWritable(): boolean {
+    const kind = this.#selector.active;
+    return !this.#closed && kind !== undefined && this.#sessions.get(kind)?.state === "ready" &&
+      this.#muxes.get(kind)?.msgQueuedBytes === 0;
+  }
+
+  #notifyMessageQueueDrained(): void {
+    if (this.#messageDrainScheduled || this.#options.onMessageQueueDrained === undefined) return;
+    this.#messageDrainScheduled = true;
+    queueMicrotask(() => {
+      this.#messageDrainScheduled = false;
+      if (this.isStateWritable) this.#options.onMessageQueueDrained?.();
+    });
   }
 
   /** ADR-0045 §8：详情在封帧前独立准入，满时返回 busy，不摘除聊天路径。 */
@@ -831,5 +854,6 @@ export class DeviceLink {
       to: change.to,
       rttMs: change.to === undefined ? undefined : this.#selector.rttOf(change.to),
     });
+    if (change.to !== undefined) this.#notifyMessageQueueDrained();
   }
 }

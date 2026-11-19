@@ -133,6 +133,8 @@ export type OutboundMuxOptions<T> = {
   maxWriteAttempts?: number;
   /** Non-bulk queue >= 1 MiB: at most one bounded sample per five seconds. */
   onQueueDiagnostic?: (sample: OutboundQueueDiagnostic) => void;
+  /** Successful writes emptied msg/history/catchup. Consumers must defer new publications until after this pump. */
+  onMessageQueueDrained?: () => void;
 };
 
 /**
@@ -396,13 +398,19 @@ export class OutboundChannelMux<T> {
     this.#channelBytes[entry.channel] -= entry.bytes;
     if (entry.channel === "bulk") this.#bulkBytes -= entry.bytes;
     let failure: unknown;
+    let written = false;
     try {
       this.#options.write(entry.frame);
+      written = true;
       if (entry.channel !== "bulk" && this.#options.onQueueDiagnostic !== undefined) this.#diagnosticWrittenBytes += entry.bytes;
-      return true;
     } catch (error) {
       failure = error;
       if (this.#options.onQueueDiagnostic !== undefined) this.#diagnosticWriteErrors += 1;
+    }
+    if (written) {
+      if (!this.#stopped && (entry.channel === "msg" || entry.channel === "history" || entry.channel === "catchup") &&
+          this.msgQueuedBytes === 0) this.#options.onMessageQueueDrained?.();
+      return true;
     }
     entry.attempts += 1;
     const limit = this.#options.maxWriteAttempts ?? DEFAULT_MAX_WRITE_ATTEMPTS;
