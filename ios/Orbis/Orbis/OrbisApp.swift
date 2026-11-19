@@ -91,6 +91,7 @@ struct OrbisApp: App {
                     AppLocalization.shared.refreshSystemLanguage(); prepareReplyNotifications()
                 } else {
                     liveActivities.setForeground(false)
+                    PushNotificationOpenCoordinator.shared.setForeground(false)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)) { _ in
@@ -99,10 +100,14 @@ struct OrbisApp: App {
     }
     private func prepareReplyNotifications() {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--preview-screen=") }) { return }
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--preview-screen=") }) {
+            PreviewNotificationOpenProbe.bind(store, foreground: scenePhase == .active)
+            return
+        }
         #endif
         OrbisAppDelegate.updatePairings(store.pairings)
         liveActivities.bind(store, foreground: scenePhase == .active)
+        PushNotificationOpenCoordinator.shared.bind(store, foreground: scenePhase == .active)
         if !store.pairings.isEmpty {
             ReplyCompletionNotifications.shared.prepare()
         }

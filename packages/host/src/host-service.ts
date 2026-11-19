@@ -23,7 +23,7 @@ import { AgentToolInventory, type PreparedToolInventory } from "./agent-tool-inv
 import { ToolInventoryIngestion } from "./tool-inventory-ingestion.js";
 import { relayHistoryMode, type RelayHistoryMode } from "./history-delivery.js";
 import { PushWakeReceipts } from "./push-wake.js";
-import { LiveActivityPublisher } from "./live-activity.js";
+import { LiveActivityPublisher, liveActivityFocusKey } from "./live-activity.js";
 
 import {
   E2eError,
@@ -3156,6 +3156,11 @@ export class HostService {
   readonly #pushWakeReceipts = new PushWakeReceipts();
   #wakeDevices(category: "task-completed" | "approval-requested", eventId: string, runtimeId: string, sessionId?: string): void {
     if (!this.#pushWakeReceipts.observe(category, eventId)) return;
+    const scope = this.#agentFacts.scopeOf(runtimeId);
+    const agentKind = scope?.kind === "agent" ? scope.key.agentKind : this.#backends.find(backend => backend.ownsRuntime(runtimeId))?.kind;
+    const targetSessionId = sessionId ?? (scope?.kind === "agent" ? scope.key.sessionId : undefined);
+    const focusKey = agentKind !== undefined && targetSessionId !== undefined
+      ? liveActivityFocusKey({ hostId: this.#identity.hostId, agentKind, sessionId: targetSessionId }) : undefined;
     // APNS-L19: capture each phone's interest at the semantic edge. Defer the
     // reachability probe until the event has been queued for its E2E recipients.
     const recipients = this.#store.devices.filter(device => !device.revoked).map(device => ({ device,
@@ -3167,19 +3172,20 @@ export class HostService {
         // Unpair/replacement may race the probe. Never revive an old recipient.
         return this.#store.devices.some(current => current.deviceId === device.deviceId && !current.revoked && current.pskRoot === device.pskRoot)
           ? device.deviceId : undefined;
-      })).then(ids => this.#sendPushWake(category, eventId, ids.filter((id): id is string => id !== undefined)))
+      })).then(ids => this.#sendPushWake(category, eventId, ids.filter((id): id is string => id !== undefined), focusKey))
         .catch(error => this.#options.log?.(`APNs routing failed: ${describeError(error)}`));
     });
   }
 
-  #sendPushWake(category: "task-completed" | "approval-requested", eventId: string, deviceIds: string[]): void {
+  #sendPushWake(category: "task-completed" | "approval-requested", eventId: string, deviceIds: string[], focusKey?: string): void {
     if (deviceIds.length === 0 || this.#relay?.state !== "connected") return;
     const url = `${relayHttpBase(this.#options.relayUrl)}/v1/push/wake`;
     if (!url.startsWith("https://")) return;
     void fetch(url, {
       method: "POST", redirect: "error", signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${this.#options.credential}`, "content-type": "application/json" },
-      body: JSON.stringify({ hostId: this.#identity.hostId, deviceIds, category, eventId }),
+      body: JSON.stringify({ hostId: this.#identity.hostId, deviceIds, category,
+        eventId: focusKey === undefined ? eventId : `focus:${focusKey}:${eventId.slice(0, 32)}` }),
     }).then(async response => {
       if (!response.ok) this.#options.log?.(`APNs wake request rejected (${response.status})`);
     }).catch(error => this.#options.log?.(`APNs wake request failed: ${describeError(error)}`));

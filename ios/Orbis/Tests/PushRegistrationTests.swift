@@ -239,7 +239,7 @@ import Combine
         XCTAssertEqual(opened.count, 1)
         let sessions: [(runtimeId: String, sessionId: String?)] = [("runtime", "session"), ("other", "other-session")]
         XCTAssertEqual(opened[0].destination(currentPairingKey: "pairing", sessions: sessions, confirmed: true), .runtime("runtime"))
-        XCTAssertEqual(opened[0].destination(currentPairingKey: "pairing", sessions: sessions, confirmed: false), .home)
+        XCTAssertNil(opened[0].destination(currentPairingKey: "pairing", sessions: sessions, confirmed: false))
         XCTAssertEqual(opened[0].destination(currentPairingKey: "pairing", sessions: [("other", "other-session")], confirmed: true), .home)
         queue.receive(["orbis": ["v": 1, "category": "task-completed", "hostId": "host", "sessionId": "session", "pairingKey": "original"]])
         XCTAssertEqual(opened.count, 2)
@@ -254,6 +254,140 @@ import Combine
         XCTAssertNil(PushNotificationOpenTarget(["hostId": "host", "sessionId": 3]))
         XCTAssertNil(PushNotificationOpenTarget(["orbis": ["v": 9, "hostId": "host"], "hostId": "host"]))
         XCTAssertNil(PushNotificationOpenTarget(["orbis": "malformed", "hostId": "host", "sessionId": "session"]))
+    }
+
+    private final class OpenStorage: SecureStorage {
+        var hosts: [HostPairing]
+        init(_ hosts: [HostPairing]) { self.hosts = hosts }
+        func deviceIdentity() throws -> DeviceIdentity { .generate() }
+        func pairings() -> [HostPairing] { hosts }
+        func savePairings(_ values: [HostPairing]) throws { hosts = values }
+    }
+    private final class OpenTransport: OrbisTransport {
+        var receive: (([String: Any], String?) -> Void)?
+        var connects = 0
+        func pair(qr: PairingQR, deviceName: String, identity: DeviceIdentity,
+                  completion: @escaping (Result<HostPairing, Error>) -> Void) { completion(.failure(PairingError.invalidQR)) }
+        func connect(pairing: HostPairing, identity: DeviceIdentity, receive: @escaping ([String: Any], String?) -> Void,
+                     state: @escaping (ConnectionState, String?) -> Void) {
+            connects += 1; self.receive = receive; state(.connecting, nil)
+        }
+        func disconnect() {}
+        func send(_ object: [String: Any]) -> Bool { true }
+        func ready(_ sessions: [(String, String)]) {
+            receive?(["type": "device.ready", "protocolVersion": orbisProtocolVersion,
+                "runtimes": sessions.map { runtime, session in
+                    ["runtimeId": runtime, "sessionId": session, "agentKind": "claude", "name": session,
+                     "cwd": "/repo", "status": "idle"]
+                }], "ctl")
+        }
+    }
+    private func remoteOpen(_ session: String, host: String = "host") -> [AnyHashable: Any] {
+        let focus = LiveActivityProjection.focusKey(hostId: host, agentKind: "claude", sessionId: session)
+        return ["orbis": ["v": 1, "category": "task-completed", "hostId": host,
+                          "eventId": "focus:" + focus + ":" + String(repeating: "a", count: 32)]]
+    }
+
+    // The real Store/HostConnection path must wait through cold launch and a
+    // connecting transport, then select the notification's session, not the first one.
+    func testNotificationColdOpenWaitsForDirectoryAndFollowsNewRuntimeIdentity() async throws {
+        let transport = OpenTransport(), queue = PushNotificationOpenQueue()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = OrbisStore(secure: OpenStorage([pairing()]), transport: transport, autoConnect: false,
+                               preferences: nil, transferRoot: root)
+        defer { store.activeConnection.shutdown(); try? FileManager.default.removeItem(at: root) }
+        queue.receive(remoteOpen("second-session"))
+        let coordinator = PushNotificationOpenCoordinator(queue: queue)
+        defer { coordinator.cancelQueuedOpen() }
+        var opened: [PushNotificationOpenCoordinator.Navigation] = []
+        let subscription = coordinator.navigation.sink { if let target = $0 { opened.append(target) } }
+        defer { subscription.cancel() }
+        coordinator.bind(store, foreground: false)
+        XCTAssertEqual(transport.connects, 0)
+        coordinator.setForeground(true)
+        XCTAssertEqual(transport.connects, 1)
+        XCTAssertTrue(opened.isEmpty)
+        await Task.yield()
+        XCTAssertTrue(opened.isEmpty)
+        transport.ready([("first-runtime", "first-session"), ("replacement-runtime", "second-session")])
+        await store.waitForPendingEvents()
+        try await until("notification target selected") { opened.count == 1 }
+        XCTAssertEqual(opened, [.init(hostId: "host", runtimeId: "replacement-runtime")])
+        XCTAssertEqual(store.selectedRuntimeId, "replacement-runtime")
+        XCTAssertNil(queue.hostId)
+        transport.ready([("third-runtime", "third-session")])
+        await store.waitForPendingEvents()
+        await Task.yield()
+        XCTAssertEqual(opened.count, 1)
+    }
+
+    // A later tap supersedes the earlier one. Explicit navigation and moving
+    // to the background must prevent a delayed connection from taking over.
+    func testNotificationReplacementAndUserCancellation() async throws {
+        let transport = OpenTransport(), queue = PushNotificationOpenQueue()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = OrbisStore(secure: OpenStorage([pairing()]), transport: transport, autoConnect: false,
+                               preferences: nil, transferRoot: root)
+        defer { store.activeConnection.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let coordinator = PushNotificationOpenCoordinator(queue: queue)
+        coordinator.bind(store, foreground: true)
+        defer { coordinator.cancelQueuedOpen() }
+        var opened: [PushNotificationOpenCoordinator.Navigation] = []
+        let subscription = coordinator.navigation.sink { if let target = $0 { opened.append(target) } }
+        defer { subscription.cancel() }
+        coordinator.receive(remoteOpen("first"))
+        coordinator.receive(remoteOpen("second"))
+        transport.ready([("a", "first"), ("b", "second")])
+        await store.waitForPendingEvents()
+        try await until("newest notification selected") { opened.count == 1 }
+        XCTAssertEqual(opened.first?.runtimeId, "b")
+        coordinator.receive(remoteOpen("not-online-yet"))
+        coordinator.cancelQueuedOpen()
+        transport.ready([("c", "not-online-yet")])
+        await store.waitForPendingEvents()
+        await Task.yield()
+        XCTAssertEqual(opened.count, 1)
+        coordinator.receive(remoteOpen("background-session"))
+        coordinator.setForeground(false)
+        transport.ready([("d", "background-session")])
+        await store.waitForPendingEvents()
+        coordinator.setForeground(true)
+        await Task.yield()
+        XCTAssertEqual(opened.count, 1)
+    }
+
+    func testNotificationTimeoutAndReplacedPairingCannotOpenAnotherChat() async throws {
+        let transport = OpenTransport(), queue = PushNotificationOpenQueue()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = OrbisStore(secure: OpenStorage([pairing()]), transport: transport, autoConnect: false,
+                               preferences: nil, transferRoot: root)
+        defer { store.activeConnection.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let coordinator = PushNotificationOpenCoordinator(queue: queue, timeout: .milliseconds(30))
+        coordinator.bind(store, foreground: true)
+        var opened: [PushNotificationOpenCoordinator.Navigation] = []
+        let subscription = coordinator.navigation.sink { if let target = $0 { opened.append(target) } }
+        defer { subscription.cancel(); coordinator.cancelQueuedOpen() }
+        coordinator.receive(["hostId": "host", "sessionId": "private", "pairingKey": "replaced"])
+        XCTAssertNil(queue.hostId)
+        XCTAssertEqual(transport.connects, 0)
+        coordinator.receive(remoteOpen("before-repair"))
+        let replacementTransport = OpenTransport()
+        let replacementStore = OrbisStore(secure: OpenStorage([pairing(credential: "new-credential")]),
+            transport: replacementTransport, autoConnect: false, preferences: nil,
+            transferRoot: root.appendingPathComponent("replacement"))
+        defer { replacementStore.activeConnection.shutdown() }
+        coordinator.bind(replacementStore, foreground: true)
+        XCTAssertNil(queue.hostId, "A queued notification cannot cross a replacement pairing")
+        XCTAssertTrue(opened.isEmpty)
+        coordinator.bind(store, foreground: true)
+        coordinator.receive(remoteOpen("missing"))
+        try await until("unreachable target falls back to its Host") { opened.count == 1 }
+        XCTAssertEqual(opened, [.init(hostId: "host", runtimeId: nil)])
+        XCTAssertNil(queue.hostId)
+        transport.ready([("unrelated", "another-chat")])
+        await store.waitForPendingEvents()
+        await Task.yield()
+        XCTAssertEqual(opened.count, 1)
     }
 
     // Replacing credentials under the same Host/device IDs must invalidate a

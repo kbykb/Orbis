@@ -18,7 +18,18 @@ struct NotificationSource: Codable, Hashable, Sendable {
     static func digest(_ hostId: String) -> String {
         SHA256.hash(data: Data(hostId.utf8)).map { String(format: "%02x", $0) }.joined()
     }
-    static func threadIdentifier(_ hostId: String) -> String { "orbis.host." + digest(hostId) }
+    static func threadIdentifier(_ hostId: String, focusKey: String? = nil) -> String {
+        let host = "orbis.host." + digest(hostId)
+        return focusKey.map { host + ".session." + $0 } ?? host
+    }
+
+    /// Existing Relays already preserve eventId. Keep routing in that opaque
+    /// field rather than sending session identifiers or conversation text.
+    static func focusKey(eventId: String?) -> String? {
+        guard let eventId, eventId.utf8.count == 103,
+              eventId.range(of: "^focus:[a-f0-9]{64}:[a-f0-9]{32}$", options: .regularExpression) != nil else { return nil }
+        return String(eventId.dropFirst(6).prefix(64))
+    }
 
     static func fallback(hostId: String, language: String) -> Self {
         let code = String(digest(hostId).prefix(4)).uppercased()
@@ -62,6 +73,69 @@ struct NotificationSource: Codable, Hashable, Sendable {
 struct NotificationSourceDirectory: Codable, Equatable, Sendable {
     var language: String
     var hosts: [String: NotificationSource]
+    var sessionDisplays: [String: SessionTitles]? = nil
+    static let maximumSessionsPerHost = 128
+    static let maximumSessions = 256
+
+    struct SessionDisplay: Equatable, Sendable {
+        let focusKey: String
+        let title: String
+    }
+    struct SessionTitles: Codable, Equatable, Sendable {
+        let pairingKey: String
+        var titles: [String: String]
+    }
+
+    static func displayTitle(_ title: String) -> String {
+        let cleaned = title.components(separatedBy: .controlCharacters).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var result = ""
+        var bytes = 0
+        for character in cleaned.prefix(160) {
+            let value = String(character), count = value.utf8.count
+            guard bytes + count <= 640 else { break }
+            result += value; bytes += count
+        }
+        return result
+    }
+
+    mutating func updateSources(_ sources: [String: NotificationSource], language: String) {
+        self.language = language
+        hosts = sources
+        sessionDisplays = sessionDisplays?.filter { hostId, display in
+            sources[hostId]?.pairingKey == display.pairingKey
+        }
+    }
+
+    /// A directory update touches this Host only. Older known names remain
+    /// useful when the user taps a delivered alert after its runtime has closed.
+    mutating func updateSessionDisplays(hostId: String, pairingKey: String, sessions: [SessionDisplay]) {
+        guard hosts[hostId]?.pairingKey == pairingKey else { return }
+        var titles: [String: String] = [:]
+        for session in sessions {
+            guard titles.count < Self.maximumSessionsPerHost else { break }
+            guard session.focusKey.utf8.count == 64, session.focusKey.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { continue }
+            let title = Self.displayTitle(session.title)
+            if !title.isEmpty { titles[session.focusKey] = title }
+        }
+        if let previous = sessionDisplays?[hostId], previous.pairingKey == pairingKey {
+            for focus in previous.titles.keys.sorted() where titles[focus] == nil {
+                guard titles.count < Self.maximumSessionsPerHost else { break }
+                titles[focus] = previous.titles[focus]
+            }
+        }
+        var displays = sessionDisplays ?? [:]
+        displays[hostId] = SessionTitles(pairingKey: pairingKey, titles: titles)
+        var remaining = Self.maximumSessions - titles.count
+        for other in displays.keys.sorted() where other != hostId {
+            guard let display = displays[other] else { continue }
+            let retained = display.titles.keys.sorted().prefix(remaining)
+            displays[other] = retained.isEmpty ? nil : SessionTitles(pairingKey: display.pairingKey,
+                titles: Dictionary(uniqueKeysWithValues: retained.map { ($0, display.titles[$0]!) }))
+            remaining -= retained.count
+        }
+        sessionDisplays = displays
+    }
 
     static func sharedURL(bundle: Bundle = .main) -> URL? {
         #if os(iOS)
@@ -76,7 +150,7 @@ struct NotificationSourceDirectory: Codable, Equatable, Sendable {
 
     static func read(from url: URL?) -> Self? {
         guard let url, let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
-              let size = values.fileSize, size <= 256 * 1024,
+              let size = values.fileSize, size <= 512 * 1024,
               let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(Self.self, from: data)
     }
@@ -99,6 +173,7 @@ struct NotificationSourceDirectory: Codable, Equatable, Sendable {
 
     struct Alert: Equatable {
         let title: String
+        let subtitle: String
         let body: String
         let threadIdentifier: String
     }
@@ -107,7 +182,10 @@ struct NotificationSourceDirectory: Codable, Equatable, Sendable {
               let host = payload["hostId"] as? String, !host.isEmpty, host.utf8.count <= 128,
               let category = payload["category"] as? String,
               ["task-completed", "approval-requested"].contains(category) else { return nil }
-        return Alert(title: source(hostId: host).name, body: body(category: category),
-            threadIdentifier: NotificationSource.threadIdentifier(host))
+        let focus = NotificationSource.focusKey(eventId: payload["eventId"] as? String)
+        let display = sessionDisplays?[host]
+        let title = display?.pairingKey == hosts[host]?.pairingKey ? focus.flatMap { display?.titles[$0] } : nil
+        return Alert(title: source(hostId: host).name, subtitle: title ?? "", body: body(category: category),
+            threadIdentifier: NotificationSource.threadIdentifier(host, focusKey: focus))
     }
 }

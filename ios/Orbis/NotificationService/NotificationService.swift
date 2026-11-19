@@ -21,7 +21,7 @@ final class NotificationService: UNNotificationServiceExtension {
                 ?? NotificationSourceDirectory(language: Locale.preferredLanguages.first ?? "en", hosts: [:])
             if let alert = directory.alert(content.userInfo) {
                 content.title = alert.title
-                content.subtitle = ""
+                content.subtitle = alert.subtitle
                 content.body = alert.body
                 content.threadIdentifier = alert.threadIdentifier
             }

@@ -81,7 +81,7 @@ private struct NavigationRoot: View, Equatable {
                               shiftsRoot: !usesSystemVerticalBar,
                               rootScrimIgnoresSafeArea: !hasVerticalEdge,
                               onFlight: { [store] phase in
-                                  if phase == .dragging { LiveActivityCoordinator.shared.cancelQueuedOpen() }
+                                  if phase == .dragging { cancelQueuedOpens() }
                                   store.holdScreenPublications(phase != nil, limit: phase == .dragging ? .seconds(5) : .seconds(1))
                               }) {
                     rootPages
@@ -182,7 +182,7 @@ private struct NavigationRoot: View, Equatable {
                     case .settings: selectRoot(.settings); navigation.replace(with: [])
                     case .update: if let url = URL(string: "https://orbising.com/#download") { openURL(url) }
                     case .restoreDraft:
-                        LiveActivityCoordinator.shared.cancelQueuedOpen()
+                        cancelQueuedOpens()
                         withAnimation(reduceMotion ? nil : .orbisCollapse) { newSessionOpen = true }
                     }
                 }
@@ -208,11 +208,12 @@ private struct NavigationRoot: View, Equatable {
     private var rootWithNavigationUpdates: some View {
         rootWithNotices
         .onChange(of: rootTab) { _, next in
-            LiveActivityCoordinator.shared.cancelQueuedOpen()
+            cancelQueuedOpens()
             switchRoot(next)
         }
         .onChange(of: facts.selectedHostId) { _, _ in
             LiveActivityCoordinator.shared.navigationSelectionChanged()
+            PushNotificationOpenCoordinator.shared.navigationSelectionChanged()
             store.setFeedbackPage(downloads: navigation.pages.last == .downloads, chat: navigation.pages.last == .chat)
             store.hostState.setCatalogQuery(directoryState.networkQuery)
             store.hostState.setCatalogVisible((drawerOpen || persistentDirectory) && scenePhase == .active)
@@ -230,13 +231,13 @@ private struct NavigationRoot: View, Equatable {
             if !pages.contains(.chat) { store.stopFollowingLaunch() }
         }
         .onChange(of: drawerOpen) { _, open in
-            if open { LiveActivityCoordinator.shared.cancelQueuedOpen() }
+            if open { cancelQueuedOpens() }
             store.hostState.setCatalogQuery(directoryState.networkQuery)
             store.hostState.setCatalogVisible((open || persistentDirectory) && scenePhase == .active)
             overlay.dismissMenu()
         }
         .onChange(of: newSessionOpen) { _, open in
-            if open { LiveActivityCoordinator.shared.cancelQueuedOpen() }
+            if open { cancelQueuedOpens() }
         }
         .onChange(of: facts.activationRevision) { _, _ in
             setDrawer(false); newSessionOpen = false
@@ -252,7 +253,10 @@ private struct NavigationRoot: View, Equatable {
 
     private var rootWithSceneUpdates: some View {
         rootWithNavigationUpdates
-        .onOpenURL { url in LiveActivityCoordinator.shared.receive(url) }
+        .onOpenURL { url in
+            PushNotificationOpenCoordinator.shared.cancelQueuedOpen()
+            LiveActivityCoordinator.shared.receive(url)
+        }
         .onReceive(LiveActivityCoordinator.shared.navigation) { target in
             guard let target else { return }
             LiveActivityCoordinator.shared.navigation.send(nil)
@@ -260,23 +264,14 @@ private struct NavigationRoot: View, Equatable {
             rootTab = .chat; displayedRoot = .chat
             navigation.replace(with: target.runtimeId == nil ? [] : [.chat])
         }
-        .onReceive(ReplyCompletionNotifications.remoteOpens.publisher) { target in
+        .onReceive(PushNotificationOpenCoordinator.shared.navigation) { target in
             guard let target else { return }
-            ReplyCompletionNotifications.remoteOpens.consume()
-            let pairing = store.pairings.first { $0.hostId == target.hostId }
-            let connection = store.connection(for: target.hostId)
-            guard let destination = target.destination(currentPairingKey: pairing.map { PushNotificationIdentity.pairingKey($0) },
-                sessions: connection?.runtimes.map { ($0.runtimeId, $0.sessionId) } ?? [],
-                confirmed: connection?.connection == .secured && connection?.homeRuntimesUpdating == false) else { return }
+            PushNotificationOpenCoordinator.shared.navigation.send(nil)
+            guard store.pairings.contains(where: { $0.hostId == target.hostId }) else { return }
             LiveActivityCoordinator.shared.cancelQueuedOpen()
-            store.connect(hostId: target.hostId)
             rootTab = .chat; displayedRoot = .chat
-            switch destination {
-            case .home: navigation.replace(with: [])
-            case .runtime(let runtimeId):
-                store.selectRuntime(hostId: target.hostId, runtimeId: runtimeId)
-                navigation.replace(with: [.chat])
-            }
+            setDrawer(false); newSessionOpen = false
+            navigation.replace(with: target.runtimeId == nil ? [] : [.chat])
         }
         .task(id: scenePhase) {
             store.setFeedbackForeground(scenePhase == .active)
@@ -292,7 +287,7 @@ private struct NavigationRoot: View, Equatable {
             }
         }
         .onChange(of: scenePhase) { old, new in
-            if new == .background { LiveActivityCoordinator.shared.cancelQueuedOpen() }
+            if new == .background { cancelQueuedOpens() }
             if new != .active { store.toolContent.close() }
             if old == .background && new == .active { store.resumeForeground() }
         }
@@ -426,14 +421,14 @@ private struct NavigationRoot: View, Equatable {
     }
 
     private func selectRoot(_ tab: RootTab) {
-        LiveActivityCoordinator.shared.cancelQueuedOpen()
+        cancelQueuedOpens()
         rootTab = tab
     }
 
     private var home: some View {
         HomeView(store: store, updates: store.homeUpdates, pageCovered: !navigation.pages.isEmpty,
                  draftOpen: newSessionOpen, draftCwd: newSessionCwd, draftCloseRequest: draftCloseRequest, onDraft: {
-            LiveActivityCoordinator.shared.cancelQueuedOpen()
+            cancelQueuedOpens()
             if !navigation.pages.isEmpty {
                 navigation.replace(with: [])
                 selectRoot(.chat)
@@ -448,7 +443,7 @@ private struct NavigationRoot: View, Equatable {
             withAnimation(reduceMotion ? nil : .orbisCollapse) { newSessionOpen = false }
             if retained { store.presentFeedback(.toast, L10n.tr("草稿已保留"), action: .restoreDraft) }
         }, onDraftSubmitted: { launch, origin in
-            LiveActivityCoordinator.shared.cancelQueuedOpen()
+            cancelQueuedOpens()
             // The card stays in the live home until the growing page has covered it, so the
             // list outside the rectangle does not move while the page expands (S35 / M27).
             if store.selectedRuntime != nil {
@@ -490,11 +485,16 @@ private struct NavigationRoot: View, Equatable {
                           onUnpair: { confirmUnpair($0) }).equatable()
     }
 
+    private func cancelQueuedOpens() {
+        LiveActivityCoordinator.shared.cancelQueuedOpen()
+        PushNotificationOpenCoordinator.shared.cancelQueuedOpen()
+    }
+
     /// A page's own back control runs the same slide as a released swipe and reveals the same source.
-    private func back() { LiveActivityCoordinator.shared.cancelQueuedOpen(); navigation.requestBack() }
-    private func push(_ page: AppPage) { LiveActivityCoordinator.shared.cancelQueuedOpen(); navigation.push(page) }
+    private func back() { cancelQueuedOpens(); navigation.requestBack() }
+    private func push(_ page: AppPage) { cancelQueuedOpens(); navigation.push(page) }
     private func setDrawer(_ open: Bool) {
-        if open { LiveActivityCoordinator.shared.cancelQueuedOpen() }
+        if open { cancelQueuedOpens() }
         withAnimation(reduceMotion ? nil : .orbisDrag) { drawerOpen = open }
     }
     private func confirmUnpair(_ host: HostPairing?) {
@@ -507,14 +507,14 @@ private struct NavigationRoot: View, Equatable {
         ])
     }
     private func openRuntime(_ runtime: RuntimeSummary) {
-        LiveActivityCoordinator.shared.cancelQueuedOpen()
+        cancelQueuedOpens()
         #if DEBUG
         ChatSchedulingTrace.pageOpenRequested(target: runtime.runtimeId)
         #endif
         store.selectRuntime(runtime.runtimeId); setDrawer(false); navigation.replace(with: [.chat])
     }
     private func openCachedSession(_ session: SessionSummary) -> Bool {
-        LiveActivityCoordinator.shared.cancelQueuedOpen()
+        cancelQueuedOpens()
         #if DEBUG
         ChatSchedulingTrace.pageOpenRequested(target: session.sessionId)
         #endif

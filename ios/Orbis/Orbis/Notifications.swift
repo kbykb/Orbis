@@ -311,28 +311,58 @@ final class OrbisAppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+/// Owned exclusively by ReplyCompletionNotifications.sourceQueue.
+private final class NotificationDisplayCache: @unchecked Sendable {
+    private var directory: NotificationSourceDirectory?
+
+    func update(language: String, _ update: (inout NotificationSourceDirectory) -> Void) -> NotificationSourceDirectory {
+        let previous = directory ?? NotificationSourceDirectory.read(from: NotificationSourceDirectory.sharedURL())
+            ?? NotificationSourceDirectory(language: language, hosts: [:])
+        var next = previous
+        update(&next)
+        directory = next
+        if next != previous, let url = NotificationSourceDirectory.sharedURL() { try? next.write(to: url) }
+        return next
+    }
+}
+
 /// Defaults to notifications after the system grants permission. iOS suspension still
 /// stops live reception; remote alerts use APNs and never carry conversation content.
 @MainActor
 final class ReplyCompletionNotifications: NSObject, UNUserNotificationCenterDelegate {
     static let shared = ReplyCompletionNotifications()
-    static let remoteOpens = PushNotificationOpenQueue()
     private var requesting = false
     private let sourceQueue = DispatchQueue(label: "orbis.notification.sources", qos: .utility)
     private var sources = NotificationSourceDirectory(language: "zh-Hans", hosts: [:])
     private var sourceRevision = 0
+    private let sourceCache = NotificationDisplayCache()
 
     func updateSources(_ pairings: [HostPairing]) {
-        sourceRevision += 1
-        let revision = sourceRevision
         let inputs = pairings.map { NotificationSource.Input(hostId: $0.hostId, name: $0.hostName,
             pairingKey: PushNotificationIdentity.pairingKey($0)) }
         let language = AppLocalization.shared.language.rawValue
-        // Serial, atomic writes keep an older pairing snapshot from overwriting
-        // a newer removal. All filesystem work runs away from the main thread.
-        sourceQueue.async { [weak self] in
-            let directory = NotificationSourceDirectory(language: language, hosts: NotificationSource.make(inputs, language: language))
-            if let url = NotificationSourceDirectory.sharedURL() { try? directory.write(to: url) }
+        updateSourceDirectory(language: language) { directory in
+            directory.updateSources(NotificationSource.make(inputs, language: language), language: language)
+        }
+    }
+
+    /// Submit only when this Host's synchronized runtime directory/title changes.
+    /// Values contain local display names and opaque focus keys, never credentials
+    /// or conversation bodies. The extension never needs the raw session ID.
+    func updateSessionDisplays(hostId: String, pairingKey: String, sessions: [NotificationSourceDirectory.SessionDisplay]) {
+        updateSourceDirectory(language: AppLocalization.shared.language.rawValue) { directory in
+            directory.updateSessionDisplays(hostId: hostId, pairingKey: pairingKey, sessions: sessions)
+        }
+    }
+
+    private func updateSourceDirectory(language: String,
+                                      _ update: @escaping @Sendable (inout NotificationSourceDirectory) -> Void) {
+        sourceRevision += 1
+        let revision = sourceRevision
+        // One serial owner merges snapshots and performs atomic App Group writes.
+        // Removing/replacing a pairing therefore cannot resurrect its old titles.
+        sourceQueue.async { [cache = sourceCache, weak self] in
+            let directory = cache.update(language: language, update)
             Task { @MainActor in
                 guard let self, self.sourceRevision == revision else { return }
                 self.sources = directory
@@ -357,7 +387,7 @@ final class ReplyCompletionNotifications: NSObject, UNUserNotificationCenterDele
     func post(hostId: String, pairingKey: String, sessionId: String, epoch: String, turnId: String, title: String) {
         let content = UNMutableNotificationContent()
         content.title = sources.source(hostId: hostId).name
-        content.subtitle = String(title.prefix(160))
+        content.subtitle = NotificationSourceDirectory.displayTitle(title)
         content.body = sources.body(category: "task-completed")
         content.threadIdentifier = NotificationSource.threadIdentifier(hostId)
         content.sound = .default
@@ -371,7 +401,7 @@ final class ReplyCompletionNotifications: NSObject, UNUserNotificationCenterDele
         didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
         Task { @MainActor in
-            Self.remoteOpens.receive(info)
+            PushNotificationOpenCoordinator.shared.receive(info)
             completionHandler()
         }
     }

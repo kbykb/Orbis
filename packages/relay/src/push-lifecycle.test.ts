@@ -168,6 +168,17 @@ describe("push registration lifecycle", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it("forwards conversation routing inside the released event ID without new Relay fields", async () => {
+    await start(); await connectHost(); await register(oldToken);
+    const send = vi.spyOn(APNsSender.prototype, "send").mockResolvedValue("sent");
+    const eventId = `focus:${"c".repeat(64)}:${"d".repeat(32)}`;
+    const body = { hostId: "host", deviceIds: ["phone"], category: "approval-requested", eventId };
+    expect((await request("/v1/push/wake", "host-secret", body)).status).toBe(200);
+    expect(send).toHaveBeenCalledExactlyOnceWith(oldToken, {
+      hostId: "host", category: "approval-requested", eventId,
+    });
+  });
+
   it("restores current registrations across relay restart and keeps different Hosts isolated", async () => {
     await start(); await register(oldToken); await register(newToken); await register(oldToken, "other-secret");
     await relay.close(); await start(); await connectHost();

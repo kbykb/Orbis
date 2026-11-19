@@ -33,6 +33,13 @@ Status: proposed
 
 兼容边界：不改变 E2E 版本、业务帧及注册／wake 请求字段；APNs 扩展键为系统标准字段，旧 App 仍能显示提醒；新增本地 attributes 字段为可缺省值。旧 Relay 的通知没有 `mutable-content`，继续显示原通用提醒；旧 Host 继续使用原路由，新展示与修复分别随相应组件升级生效。
 
+### 通知直达会话修订（2026-11-19）
+
+- 新 Host 将现有 wake `eventId` 编为 `focus:<focusKey>:<occurrence>`：`focusKey` 直接复用实时活动的 `liveActivityFocusKey(AgentKey)`，`occurrence` 使用原事件摘要的前 32 个十六进制字符。总长度 103 字符，满足已发布 Relay 的 128 字符限制和字符校验；Relay 无须升级，仍将既有字段原样发给 APNs。Host 的业务去重保留原完整事件标识，不把同一会话的不同提醒合并。
+- iOS 从事件标识取出不透明焦点键，重新验证当前配对及会话映射后进入相应会话；冷启动先保留意图，等目标 Host 连接及当前映射到达后处理。旧通知没有焦点键或目标会话已消失时回对应电脑首页。推送仍不携带原始会话 ID、标题、正文、工具参数、凭据或回答动作。
+- App Group 来源目录可保存从 E2E 会话目录获得的本机会话标题及对应焦点键，通知扩展只从该目录补副标题。目录缺失或未见过该会话时保留通用提醒；扩展不访问网络。解除／替换配对时清理对应本地会话展示数据。
+- 回归分别覆盖 Host 的审批／完成事件、未修改的 Relay HTTP wake 校验与原样转发，以及实际 HTTP/2 APNs envelope。自动验证不代表官方 Relay 已完成真实 Apple 投递；更新 Host 与 App 后的通知点击与设备展示仍需真机验收。
+
 实现入口：Host `DeviceLink.confirmNotificationReachability` 与 `HostService` 的逐设备 wake；Relay `APNsSender`；iOS `NotificationSource.swift`、`PushRegistration.swift`、`Notifications.swift`、`NotificationService/` 及原实时活动组件。回归见 `device-link.test.ts`、`host-service.test.ts` 的 APNS-L18／L19、`apns-transport.test.ts`、`NotificationSourceTests`、`PushRegistrationTests`、`LiveActivityPresentationTests`。
 
 2026-11-18 本机实施与自动验证完成：Node 定向验证 92 项通过；Swift 定向验证与独立发布版互通共 32 项通过；TypeScript 检查及 iOS App／Widget／通知扩展的 arm64、x86_64 编译通过。覆盖 2 Host × 2 手机、仅一台手机断开／切换、事件与离线反馈竞态、旧 App 无 interest、相同 Host 名及相同事件 ID、点击冷启动和完整配对替换。最近发布 v0.1.21 的真实 Relay 与 Swift 点击解析器通过注册、重连、回退和新通知包对照；E2E schema 与设备协议源码哈希保持一致。原缺陷证据保留于 `.artifacts/push-multihost-audit-20261117/`，本轮结果、首次失败及清理证据见 `.artifacts/push-multihost-fix-20261118/verification.json`。未部署、未安装到设备；App Group／扩展签名、真实 APNs 投递和灵动岛观感待用户验证。共享 QA MCP 当前连接被拒绝，登记请求条件与本轮完整验收要求保留在同目录 `qa-registration.json`；尚未建立可领取轮次。

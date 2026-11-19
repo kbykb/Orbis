@@ -37,6 +37,7 @@ struct PushNotificationOpenTarget: Equatable {
     let hostId: String
     let sessionId: String?
     let pairingKey: String?
+    let focusKey: String?
 
     init?(_ userInfo: [AnyHashable: Any]) {
         let payload: [AnyHashable: Any]
@@ -54,14 +55,20 @@ struct PushNotificationOpenTarget: Equatable {
         if payload["sessionId"] != nil && identifier("sessionId", limit: 4096) == nil { return nil }
         if payload["pairingKey"] != nil && identifier("pairingKey", limit: 128) == nil { return nil }
         hostId = host; sessionId = identifier("sessionId", limit: 4096); pairingKey = identifier("pairingKey", limit: 128)
+        focusKey = NotificationSource.focusKey(eventId: payload["eventId"] as? String)
     }
 
     enum Destination: Equatable { case home, runtime(String) }
-    func destination(currentPairingKey: String?, sessions: [(runtimeId: String, sessionId: String?)], confirmed: Bool) -> Destination? {
+    func destination(currentPairingKey: String?, sessions: [(runtimeId: String, sessionId: String?)],
+                     focusRoutes: [String: String] = [:], confirmed: Bool) -> Destination? {
         guard let currentPairingKey, pairingKey == nil || pairingKey == currentPairingKey else { return nil }
-        guard confirmed, let sessionId else { return .home }
-        let matches = sessions.filter { $0.sessionId == sessionId }
-        return matches.count == 1 ? .runtime(matches[0].runtimeId) : .home
+        guard confirmed else { return nil }
+        if let sessionId {
+            let matches = sessions.filter { $0.sessionId == sessionId }
+            return matches.count == 1 ? .runtime(matches[0].runtimeId) : .home
+        }
+        if let focusKey, let runtimeId = focusRoutes[focusKey] { return .runtime(runtimeId) }
+        return .home
     }
 }
 
@@ -75,6 +82,144 @@ struct PushNotificationOpenTarget: Equatable {
         pending.send(target)
     }
     func consume() { pending.send(nil) }
+}
+
+/// Keep a tapped notification until its Host has supplied the current directory.
+/// Only the target connection is observed, and observations end when navigation
+/// succeeds, the user navigates, or a newer tap replaces this one.
+@MainActor final class PushNotificationOpenCoordinator {
+    static let shared = PushNotificationOpenCoordinator()
+    struct Navigation: Equatable { let hostId: String; let runtimeId: String? }
+    let navigation = CurrentValueSubject<Navigation?, Never>(nil)
+    private struct Identity: Equatable {
+        let runtimeId: String
+        let sessionId: String?
+        let agentKind: String?
+    }
+    private let queue: PushNotificationOpenQueue
+    private let timeout: Duration
+    private weak var store: OrbisStore?
+    private var foreground = false
+    private var target: PushNotificationOpenTarget?
+    private var queuedHostId: String?
+    private var queuedPairingKey: String?
+    private weak var targetConnection: HostConnection?
+    private var identities: [Identity] = []
+    private var focusRoutes: [String: String] = [:]
+    private var queueObservation: AnyCancellable?
+    private var connectionObservations: [AnyCancellable] = []
+    private var retry: Task<Void, Never>?
+    private var expiry: Task<Void, Never>?
+
+    init(queue: PushNotificationOpenQueue? = nil, timeout: Duration = .seconds(30)) {
+        self.queue = queue ?? PushNotificationOpenQueue(); self.timeout = timeout
+        queueObservation = self.queue.publisher.sink { [weak self] in self?.received($0) }
+    }
+
+    func receive(_ userInfo: [AnyHashable: Any]) { queue.receive(userInfo) }
+
+    func bind(_ store: OrbisStore, foreground: Bool) {
+        self.store = store
+        setForeground(foreground)
+        routeOpen()
+    }
+
+    func setForeground(_ value: Bool) {
+        if foreground && !value { cancelQueuedOpen() }
+        foreground = value
+        if value { routeOpen() }
+    }
+
+    func cancelQueuedOpen() { queue.consume() }
+
+    func navigationSelectionChanged() {
+        if let queuedHostId, let store, store.selectedHostId != queuedHostId { cancelQueuedOpen() }
+    }
+
+    private func received(_ next: PushNotificationOpenTarget?) {
+        retry?.cancel(); retry = nil; expiry?.cancel(); expiry = nil
+        connectionObservations = []; identities = []; focusRoutes = [:]
+        queuedHostId = nil; queuedPairingKey = nil; targetConnection = nil
+        target = next
+        guard next != nil else { return }
+        expiry = Task { [weak self, timeout] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            self?.finish(runtimeId: nil)
+        }
+        routeOpen()
+    }
+
+    private func schedule() {
+        guard target != nil, retry == nil else { return }
+        retry = Task { [weak self] in
+            await Task.yield() // @Published announces before its new value is installed.
+            guard !Task.isCancelled, let self else { return }
+            self.retry = nil
+            self.routeOpen()
+        }
+    }
+
+    private func routeOpen() {
+        guard foreground, let target, let store else { return }
+        navigationSelectionChanged()
+        guard self.target != nil else { return }
+        guard let pairing = store.pairings.first(where: { $0.hostId == target.hostId }),
+              target.pairingKey == nil || target.pairingKey == PushNotificationIdentity.pairingKey(pairing),
+              let connection = store.connection(for: target.hostId) else { cancelQueuedOpen(); return }
+        if queuedHostId != nil && (queuedPairingKey != PushNotificationIdentity.pairingKey(pairing) || targetConnection !== connection) {
+            cancelQueuedOpen(); return
+        }
+        if queuedHostId == nil {
+            queuedHostId = target.hostId
+            queuedPairingKey = PushNotificationIdentity.pairingKey(pairing)
+            targetConnection = connection
+            store.connect(hostId: target.hostId)
+            connectionObservations = [
+                connection.$runtimes.map { $0.map { Identity(runtimeId: $0.runtimeId, sessionId: $0.sessionId, agentKind: $0.agentKind) } }
+                    .removeDuplicates().sink { [weak self] identities in
+                        guard let self else { return }
+                        self.identities = identities
+                        // Reuse the ActivityKit route identity; never send raw session IDs through APNs.
+                        let routes = identities.compactMap { identity -> (String, String)? in
+                            guard let session = identity.sessionId, let kind = identity.agentKind else { return nil }
+                            return (LiveActivityProjection.focusKey(hostId: target.hostId, agentKind: kind, sessionId: session), identity.runtimeId)
+                        }
+                        self.focusRoutes = Dictionary(grouping: routes, by: { $0.0 }).compactMapValues {
+                            $0.count == 1 ? $0[0].1 : nil
+                        }
+                        self.schedule()
+                    },
+                connection.$runtimes.sink { [weak self] _ in self?.schedule() },
+                connection.$connection.sink { [weak self] _ in self?.schedule() }
+            ]
+        }
+        guard connection.connection == .secured else { return }
+        let sessions = identities.map { ($0.runtimeId, $0.sessionId) }
+        let match = target.sessionId.map { id in identities.filter { $0.sessionId == id }.count == 1 }
+            ?? target.focusKey.map { focusRoutes[$0] != nil } ?? true
+        guard let destination = target.destination(currentPairingKey: PushNotificationIdentity.pairingKey(pairing),
+            sessions: sessions, focusRoutes: focusRoutes,
+            confirmed: match || !connection.homeRuntimesUpdating) else { return }
+        switch destination {
+        case .home: finish(runtimeId: nil)
+        case .runtime(let runtimeId): finish(runtimeId: runtimeId)
+        }
+    }
+
+    private func finish(runtimeId: String?) {
+        guard foreground, let target, let store,
+              let pairing = store.pairings.first(where: { $0.hostId == target.hostId }),
+              store.selectedHostId == queuedHostId,
+              queuedPairingKey == PushNotificationIdentity.pairingKey(pairing),
+              store.connection(for: target.hostId) === targetConnection,
+              target.pairingKey == nil || target.pairingKey == PushNotificationIdentity.pairingKey(pairing) else {
+            cancelQueuedOpen(); return
+        }
+        let hostId = target.hostId
+        cancelQueuedOpen()
+        if let runtimeId { store.selectRuntime(hostId: hostId, runtimeId: runtimeId) }
+        navigation.send(Navigation(hostId: hostId, runtimeId: runtimeId))
+    }
 }
 
 private final class PushHTTPDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {

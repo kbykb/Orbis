@@ -56,6 +56,7 @@ import { type RelayServer } from "@orbis/relay";
 import { createBusinessRelayServer as createRelayServer, relayBusinessHostOptions, restartBusinessHostQUIC } from "./fixtures/relay-business-transport.js";
 
 import { HostService, channelForDeviceMessage } from "./host-service.js";
+import { liveActivityFocusKey } from "./live-activity.js";
 import { HostRelayClient } from "./relay-client.js";
 import * as relaySocket from "./relay-socket.js";
 import * as pushRelayConfig from "./config.js";
@@ -5224,6 +5225,10 @@ describe("APNS-L18/L19 per-phone push routing", () => {
     await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
     const body = JSON.parse(wake.mock.calls[0]![1]!.body as string);
     expect(body.category).toBe("approval-requested");
+    expect(body.eventId).toMatch(new RegExp(`^focus:${liveActivityFocusKey({ hostId: control.payload.hostId, agentKind: "pi", sessionId: "session" })}:[a-f0-9]{32}$`, "u"));
+    expect(body).not.toHaveProperty("focusKey");
+    expect(body).not.toHaveProperty("sessionId");
+    expect(body).not.toHaveProperty("title");
     expect(body.deviceIds.sort()).toEqual([control.device.deviceId, disconnected.device.deviceId].sort());
   });
 
@@ -5260,6 +5265,7 @@ describe("APNS-L18/L19 per-phone push routing", () => {
     await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
     const body = JSON.parse(wake.mock.calls[0]![1]!.body as string);
     expect(body.category).toBe("task-completed");
+    expect(body.eventId).toMatch(new RegExp(`^focus:${liveActivityFocusKey({ hostId: control.payload.hostId, agentKind: "pi", sessionId: "session" })}:[a-f0-9]{32}$`, "u"));
     expect(body.deviceIds).not.toContain(viewing.device.deviceId);
     expect(body.deviceIds.sort()).toEqual([control.device.deviceId, online.device.deviceId].sort());
     online.device.sendCommand("runtime", "barrier", { type: "stop" });

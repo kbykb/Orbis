@@ -16,6 +16,35 @@ import UIKit
 final class OrbisUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
+    func testTappingSystemNotificationOpensItsConversation() {
+        for mode in ["remote", "local"] {
+            let app = launch("chat", arguments: ["--preview-notification-open=" + mode, "--preview-reduce-motion"])
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            let allow = springboard.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "允许", "Allow")).firstMatch
+            if allow.waitForExistence(timeout: 3) { allow.tap() }
+            let title = app.buttons["chat-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 8))
+            XCTAssertTrue(title.label.contains("对齐移动端的使用体验"))
+
+            XCUIDevice.shared.press(.home)
+            let notification = springboard.staticTexts["Orbis 会话跳转测试"].firstMatch
+            if !notification.waitForExistence(timeout: 6) {
+                let top = springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.01))
+                top.press(forDuration: 0.05, thenDragTo: springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.75)))
+            }
+            XCTAssertTrue(notification.waitForExistence(timeout: 5), "The system must deliver the notification before routing is checked")
+            capture("notification-open-\(mode)-system-alert", app: springboard)
+            notification.tap()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8))
+            let routed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "梳理项目中的页面结构"), object: title)
+            XCTAssertEqual(XCTWaiter.wait(for: [routed], timeout: 10), .completed)
+            XCTAssertFalse(title.label.contains("对齐移动端的使用体验"))
+            XCTAssertTrue(app.descendants(matching: .any)["chat-composer"].firstMatch.exists)
+            capture("notification-open-\(mode)-target-conversation", app: app)
+            app.terminate()
+        }
+    }
+
     func testNativeGoalPanelReadsEditsPausesAndResumes() {
         let app = launch("chat", arguments: ["--preview-goal", "--preview-reduce-motion"])
         let entry = app.buttons["chat-goal"]

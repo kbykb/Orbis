@@ -2,6 +2,8 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Combine
+import UserNotifications
 
 /// MATH-01: offline production renderer fixture for both themes, tables and streamed completion.
 struct MathRenderingPreview: View {
@@ -458,6 +460,43 @@ struct PreviewHomeRefreshReport: View {
 
 // Explicit launch arguments opt into isolated, in-memory fixtures for UI review.
 // They never read Keychain, connect to a real Host, or persist preview content.
+/// Exercise the OS notification delegate and production navigation with the
+/// existing in-memory Codex/Pi sessions. Nothing is sent to a Relay or APNs.
+@MainActor enum PreviewNotificationOpenProbe {
+    private static let identifier = "orbis.preview.notification-open"
+    private static var background: AnyCancellable?
+
+    static func bind(_ store: OrbisStore, foreground: Bool) {
+        guard let mode = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--preview-notification-open=") })
+            .map({ String($0.dropFirst("--preview-notification-open=".count)) }),
+              let pairing = store.pairings.first else { return }
+        PushNotificationOpenCoordinator.shared.bind(store, foreground: foreground)
+        guard background == nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        let focusKey = LiveActivityProjection.focusKey(hostId: pairing.hostId, agentKind: "pi", sessionId: "session-2")
+        let payload: [String: Any] = mode == "local"
+            ? ["v": 1, "category": "task-completed", "hostId": pairing.hostId,
+               "sessionId": "session-2", "pairingKey": PushNotificationIdentity.pairingKey(pairing)]
+            : ["v": 1, "category": "task-completed", "hostId": pairing.hostId,
+               "eventId": "focus:\(focusKey):" + String(repeating: "a", count: 32)]
+        // Schedule only after Home is pressed, so UI-test startup or the first
+        // permission alert cannot consume the notification while still in-app.
+        background = NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification).sink { _ in
+            let content = UNMutableNotificationContent()
+            content.title = "Orbis 会话跳转测试"
+            content.subtitle = "梳理项目中的页面结构"
+            content.body = "任务已完成"
+            content.sound = .default
+            content.userInfo = ["orbis": payload]
+            center.add(UNNotificationRequest(identifier: identifier, content: content,
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)))
+        }
+        Task { _ = try? await center.requestAuthorization(options: [.alert, .sound]) }
+    }
+}
+
 @MainActor
 func makePreviewStore(screen: String) -> OrbisStore {
     PreviewHomeRefreshProbe.shared.reads = 0

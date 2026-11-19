@@ -56,6 +56,14 @@ final class OrbisStore: ObservableObject {
     private let factory: (HostPairing) -> OrbisTransport
     private var connections: [String: HostConnection] = [:]
     private var observations: [String: AnyCancellable] = [:]
+    #if os(iOS)
+    private struct NotificationSessionIdentity: Equatable {
+        let sessionId: String
+        let agentKind: String
+        let title: String
+    }
+    private var notificationDisplayObservations: [String: AnyCancellable] = [:]
+    #endif
     private var started: Set<String> = []
     private let emptyConnection: HostConnection
     private var pairingTransport: OrbisTransport?
@@ -145,6 +153,30 @@ final class OrbisStore: ObservableObject {
         }
         connections[pairing.hostId] = connection
         observations[pairing.hostId] = connection.objectWillChange.sink { [weak self] _ in self?.publishChanges(hostId: pairing.hostId) }
+        #if os(iOS)
+        if preferences != nil {
+            // Establish the pairing on the serial writer before the first directory
+            // arrives; isolated previews/tests never write notification display data.
+            ReplyCompletionNotifications.shared.updateSources(pairings)
+            // Observe directory metadata only: streamed message tokens never rewrite
+            // the notification extension's local display-name cache.
+            notificationDisplayObservations[pairing.hostId] = connection.$runtimes.map { runtimes in
+                runtimes.compactMap { runtime -> NotificationSessionIdentity? in
+                    guard let session = runtime.sessionId, let kind = runtime.agentKind else { return nil }
+                    return NotificationSessionIdentity(sessionId: session, agentKind: kind, title: runtime.sessionName ?? runtime.name)
+                }
+            }.removeDuplicates().sink { sessions in
+                guard !sessions.isEmpty else { return }
+                let displays = sessions.prefix(NotificationSourceDirectory.maximumSessionsPerHost).map {
+                    NotificationSourceDirectory.SessionDisplay(
+                        focusKey: LiveActivityProjection.focusKey(hostId: pairing.hostId, agentKind: $0.agentKind, sessionId: $0.sessionId),
+                        title: $0.title)
+                }
+                ReplyCompletionNotifications.shared.updateSessionDisplays(hostId: pairing.hostId,
+                    pairingKey: PushNotificationIdentity.pairingKey(pairing), sessions: displays)
+            }
+        }
+        #endif
         if connect { started.insert(pairing.hostId); connection.connect(hostId: pairing.hostId) }
     }
 
@@ -252,6 +284,9 @@ final class OrbisStore: ObservableObject {
             return
         }
         observations.removeValue(forKey: hostId)?.cancel(); started.remove(hostId)
+        #if os(iOS)
+        notificationDisplayObservations.removeValue(forKey: hostId)?.cancel()
+        #endif
         connection.purgeLocalData(); connections[hostId] = nil; pairings = next
         let cleanupId = UUID()
         cleanupTasks[cleanupId] = Task { [weak self] in

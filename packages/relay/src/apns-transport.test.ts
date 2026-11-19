@@ -88,6 +88,15 @@ describe("APNs transport lifecycle", () => {
     await expect(f.sender.send("a".repeat(64), hint)).resolves.toBe("invalid-token"); f.sender.close();
   });
 
+  it("keeps the conversation route opaque in the actual APNs envelope", async () => {
+    const f = fixture();
+    const eventId = `focus:${"b".repeat(64)}:${"c".repeat(32)}`;
+    await f.sender.send("a".repeat(64), { ...hint, eventId });
+    expect(f.sent[0]!.payload.orbis).toEqual({ v: 1, ...hint, eventId });
+    expect(f.sent).toHaveLength(1);
+    f.sender.close();
+  });
+
   it.each([[403, "InvalidProviderToken"], [429, "TooManyRequests"], [500, "InternalServerError"], [503, "ServiceUnavailable"]])("preserves destination on %i %s", async (status, reason) => {
     const f = fixture(status as number, reason as string);
     await expect(f.sender.send("a".repeat(64), hint)).rejects.toThrow(String(reason)); f.sender.close();
