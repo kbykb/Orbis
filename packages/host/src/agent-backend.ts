@@ -218,6 +218,10 @@ export type ClaudeBackendOptions = {
   bridge: ClaudeHookBridge;
   modsBridge: ClaudeModsBridge;
   runtimeIds: () => readonly string[];
+  isSessionDetached?: (sessionId: string) => boolean;
+  /** Persist before acknowledging; publish offline after the acknowledgement. */
+  detachSession?: (sessionId: string, beforeOffline: () => void) => Promise<void>;
+  restoreSession?: (sessionId: string) => Promise<boolean>;
   /** Claude config directories whose transcripts form the Session directory. */
   configDirs?: () => readonly string[];
   catalog?: ClaudeSessionCatalog;
@@ -264,7 +268,9 @@ export class ClaudeBackend implements AgentBackend {
     return read.call(this.#options.launcher, cwd);
   }
 
-  ownsRuntime(runtimeId: string): boolean { return runtimeId.startsWith("claude:") && this.#options.runtimeIds().includes(runtimeId); }
+  ownsRuntime(runtimeId: string): boolean {
+    return runtimeId.startsWith("claude:") && !this.#options.isSessionDetached?.(runtimeId.slice("claude:".length)) && this.#options.runtimeIds().includes(runtimeId);
+  }
 
   async catalog(archived = false): Promise<AgentSessionSummary[]> {
     const catalog = this.#options.catalog;
@@ -291,6 +297,7 @@ export class ClaudeBackend implements AgentBackend {
 
   async activate(target: AgentActivateTarget, context?: AgentActivateContext): Promise<BackendActivation> {
     if (target.type === "resume") {
+      const restored = await this.#options.restoreSession?.(target.sessionId);
       if (this.#options.runtimeIds().includes(`claude:${target.sessionId}`)) {
         if (context?.configuration) {
           const live = this.directoryEntries().find(item => item.sessionId === target.sessionId);
@@ -299,6 +306,7 @@ export class ClaudeBackend implements AgentBackend {
         }
         return { sessionId: target.sessionId, spawnMode: "tui" };
       }
+      if (restored) throw new ActivationError("spawn_failed", "原有 Claude Code 尚未重新连接，请稍后重试；未重复启动进程。");
       const file = await this.#options.catalog?.find(target.sessionId, this.#configDirs());
       if (file === undefined) throw new ActivationError("session_not_found", `Claude Code 会话目录里没有 ${target.sessionId}`);
       await this.#requireDirectory(file.cwd);
@@ -375,6 +383,18 @@ export class ClaudeBackend implements AgentBackend {
     if (command.type === "slash.execute") {
       if (!this.#options.modsBridge.isOnline(runtimeId)) return "unsupported";
       if (!this.#options.modsBridge.hasCommand(runtimeId, command.name)) return "unsupported";
+      if (command.name === "orbis-detach") {
+        const detach = this.#options.detachSession;
+        if (command.args.trim() || detach === undefined) return "unsupported";
+        this.#options.onCommandResult?.(runtimeId, { type: "command.result", commandId, ok: true, status: "pending" });
+        void detach(runtimeId.slice("claude:".length), () => {
+          this.#options.onCommandResult?.(runtimeId, { type: "command.result", commandId, ok: true, status: "success" });
+        }).catch(error => {
+          this.#options.onCommandResult?.(runtimeId, { type: "command.result", commandId, ok: false, status: "failure",
+            error: error instanceof Error ? error.message : "无法从 Orbis 移除 Claude Code 会话" });
+        });
+        return "handled";
+      }
       if (command.name === "quit") {
         if (command.args.trim()) return "unsupported";
         const generation = this.#options.modsBridge.generationOf(runtimeId);
@@ -417,7 +437,7 @@ export class ClaudeBackend implements AgentBackend {
     for (const runtime of this.#options.modsBridge.runtimeMetadata()) {
       entries.set(runtime.runtimeId, { ...runtime, status: hooks.get(runtime.runtimeId)?.status ?? runtime.status });
     }
-    return [...entries.values()];
+    return [...entries.values()].filter(runtime => !this.#options.isSessionDetached?.(runtime.sessionId ?? runtime.runtimeId.slice("claude:".length)));
   }
 
   /** Home facts must not wait for a conversation sync: even an empty Hook inventory is authoritative. */

@@ -4730,6 +4730,118 @@ describe("Claude Code TUI 接线（ADR-0033）", () => {
     if (transportCleanup) throw transportCleanup;
   });
 
+  it("keeps detached native Sessions out of reconnects and Host restarts, then reuses their plugin on explicit restore", async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-claude-detach-"));
+    const config = join(stateDir, "claude");
+    const launch = vi.fn(async () => undefined);
+    relay = await createRelayServer({ port: 0, runtimeCredentials: ["runtime-secret"], adminToken: "owner-secret", stateFile: join(stateDir, "relay-state.json") });
+    const createHost = () => HostService.create({ relayUrl: relay!.url, ...relayBusinessHostOptions(relay!.url), credential: "runtime-secret",
+      adminToken: "owner-secret", stateDir: stateDir!, sessionsRoot: join(stateDir!, "pi"), reconnect: false, lan: false,
+      claude: { configDir: config, launcher: { unavailable: async () => undefined, launch } } });
+    const post = async (path: string, body: unknown) => {
+      const descriptor = host!.loopback!.descriptor!;
+      const response = await fetch(descriptor.url.replace(/^ws/u, "http") + path, { method: "POST",
+        headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      return await response.json() as Record<string, unknown>;
+    };
+    const hello = (sessionId: string) => post("/v1/claude/mods/hello", { type: "hello", instanceId: `native-${sessionId}`, sessionId,
+      cwd: stateDir, configDir: config, claudeVersion: "2.1.312", bridgeVersion: "4", interactive: true,
+      capabilities: ["prompt.submit", "turn.abort", "session.append", "turn.start", "turn.complete", "turn.step.delta", "tool.call", "turn.step.identity", "agent.list"] });
+    const seen: Record<string, unknown>[] = [];
+    const until = async (predicate: (message: Record<string, unknown>) => boolean) => {
+      for (let i = 0; i < 80; i++) {
+        const message = await device!.receiveMessage(); seen.push(message);
+        if (predicate(message)) return message;
+      }
+      throw new Error("Expected Claude detach response");
+    };
+    const connectDevice = async () => {
+      const opened = await host!.openPairingWindow();
+      device = (await TestDevice.connect({ relayUrl: relay!.url, relayHttpBase: relay!.url.replace(/^ws/u, "http"),
+        qrText: encodePairingQrText(opened.payload), deviceName: "detach-test" })).device;
+      const pskRoot = await device.pair(opened.payload);
+      await device.openChannel("relay", pskRoot, opened.payload.hostId, opened.payload.hostId);
+      return { pskRoot, hostId: opened.payload.hostId, ready: await until(message => message.type === "device.ready") };
+    };
+    host = await createHost(); await host.start();
+    const connected = await connectDevice();
+    const first = await hello("first"); await hello("second");
+    await until(message => message.type === "runtime.online" && (message.runtime as RuntimeMetadata).runtimeId === "claude:second");
+    const pendingPermission = post("/v1/claude/hook", { hook_event_name: "PermissionRequest", session_id: "first", cwd: stateDir,
+      tool_name: "Bash", tool_input: { command: "native-only-permission" } });
+    await until(message => message.runtimeId === "claude:first" && (message.event as RuntimeEvent | undefined)?.type === "interaction.requested");
+    const beforeDetach = seen.length;
+    device!.sendCommand("claude:first", "detach", { type: "slash.execute", name: "orbis-detach", args: "" });
+    await until(message => message.type === "runtime.offline" && message.runtimeId === "claude:first");
+    expect(seen.slice(beforeDetach).filter(message => message.runtimeId === "claude:first" &&
+      (message.type === "runtime.offline" || (message.event as RuntimeEvent | undefined)?.type === "command.result")))
+      .toEqual([
+        expect.objectContaining({ event: { type: "command.result", commandId: "detach", ok: true, status: "pending" } }),
+        expect.objectContaining({ event: { type: "command.result", commandId: "detach", ok: true, status: "success" } }),
+        expect.objectContaining({ type: "runtime.offline", runtimeId: "claude:first", reason: "detached_from_orbis" }),
+      ]);
+    await expect(pendingPermission).resolves.toEqual({});
+    const privatePoll = await post("/v1/claude/mods/poll", { runtimeId: "claude:first", generation: first.generation });
+    expect(privatePoll).toMatchObject({ ok: true, commands: [] });
+    expect(privatePoll.pendingInteractions ?? 0).toBe(0);
+    await expect(post("/v1/claude/hook", { hook_event_name: "PermissionRequest", session_id: "first", cwd: stateDir,
+      tool_name: "Bash", tool_input: { command: "still-native" } })).resolves.toEqual({});
+    // A new plugin handshake for the same native Session must remain private.
+    const beforePrivateEvents = seen.length;
+    const rehello = await hello("first");
+    expect(rehello).toMatchObject({ ok: true });
+    for (const event of [{ type: "turn.start", turnId: "native-turn" },
+      { type: "session.state", state: { model: "opus" } }, { type: "turn.complete", turnId: "native-turn", answer: "native only" }]) {
+      expect(await post("/v1/claude/mods/event", { runtimeId: "claude:first", generation: rehello.generation, event }))
+        .toMatchObject({ result: "accepted" });
+    }
+    device!.sendData(JSON.stringify({ type: "session.list", protocolVersion: PROTOCOL_VERSION, requestId: "private-events-sentinel" }));
+    await until(message => message.type === "session.list.result" && message.requestId === "private-events-sentinel");
+    expect(seen.slice(beforePrivateEvents).filter(message => message.runtimeId === "claude:first" ||
+      message.type === "runtime.online" && (message.runtime as RuntimeMetadata).runtimeId === "claude:first")).toEqual([]);
+    await device!.replaceRelay("ws", connected.pskRoot, connected.hostId);
+    const reconnected = await until(message => message.type === "device.ready");
+    expect((reconnected.runtimes as RuntimeMetadata[]).map(runtime => runtime.runtimeId)).toEqual(["claude:second"]);
+    await host.detachClaudeSession("second");
+    expect(JSON.parse(await readFile(join(stateDir, "claude-detached-sessions.json"), "utf8")))
+      .toEqual({ version: 1, sessionIds: ["first", "second"] });
+
+    // Real Host restart: both plugins reconnect, but a newly paired phone sees neither row.
+    device!.close(); await host.stop(); host = await createHost(); await host.start();
+    await hello("first"); await hello("second");
+    const restarted = await connectDevice();
+    expect(restarted.ready.runtimes).toEqual([]);
+
+    // Another cold start exercises reopening before the native plugin has reconnected.
+    device!.close(); await host.stop(); host = await createHost(); await host.start();
+    expect((await connectDevice()).ready.runtimes).toEqual([]);
+    device!.sendData(JSON.stringify({ type: "session.activate", protocolVersion: PROTOCOL_VERSION, requestId: "restore-first",
+      target: { type: "resume", agentKind: "claude", sessionId: "first" } }));
+    await vi.waitFor(() => expect(host!.readHostState(["operations"]).domains[0]?.value).toMatchObject({ activationsPending: 1 }));
+    expect(launch).not.toHaveBeenCalled();
+    await hello("second");
+    await hello("first");
+    expect(await until(message => message.type === "session.activated" && message.requestId === "restore-first"))
+      .toMatchObject({ agentKind: "claude", sessionId: "first", spawnMode: "tui" });
+    expect(launch).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(join(stateDir, "claude-detached-sessions.json"), "utf8")))
+      .toEqual({ version: 1, sessionIds: ["second"] });
+  });
+
+  it("keeps a detached Session hidden when its existing native plugin does not reconnect", async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "orbis-claude-detach-timeout-"));
+    host = await HostService.create({ relayUrl: "ws://127.0.0.1:1", credential: "test", stateDir, lan: false });
+    await host.detachClaudeSession("offline");
+    vi.useFakeTimers();
+    try {
+      const restore = expect(host.restoreClaudeSession("offline")).rejects.toMatchObject({ code: "spawn_failed", message: expect.stringContaining("未重复启动进程") });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await restore;
+    } finally { vi.useRealTimers(); }
+    expect(JSON.parse(await readFile(join(stateDir, "claude-detached-sessions.json"), "utf8")))
+      .toEqual({ version: 1, sessionIds: ["offline"] });
+  });
+
   it("captures a turn at authenticated barriers and serves frozen diffs only after an encrypted detail request", async () => {
     stateDir = await mkdtemp(join(tmpdir(), "orbis-review-e2e-"));
     const workspace = join(stateDir, "workspace"), config = join(stateDir, "claude-config");
@@ -4859,6 +4971,12 @@ describe("Claude Code TUI 接线（ADR-0033）", () => {
     sendRequest(device, { type: "session.launch.read", protocolVersion: PROTOCOL_VERSION, requestId: "check", launchId: "late" });
     expect(await response("check", "ready")).toMatchObject({ sessionId: expectedSessionId });
     expect(launchNative).toHaveBeenCalledTimes(2);
+    await host.detachClaudeSession(expectedSessionId!);
+    sendRequest(device, { type: "session.launch.read", protocolVersion: PROTOCOL_VERSION, requestId: "detached-check", launchId: "late" });
+    expect(await response("detached-check", "ready")).toMatchObject({ sessionId: expectedSessionId });
+    expect(JSON.parse(await readFile(join(stateDir, "claude-detached-sessions.json"), "utf8")))
+      .toEqual({ version: 1, sessionIds: [expectedSessionId] });
+    expect(launchNative).toHaveBeenCalledTimes(2);
   });
 
   it("carries a Claude TUI's directory, slash menu, commands and tool activity over the encrypted device channel", async () => {
@@ -4929,7 +5047,7 @@ describe("Claude Code TUI 接线（ADR-0033）", () => {
     const capabilities = await until(message => message.runtimeId === "claude:live-session" &&
       (message.event as RuntimeEvent | undefined)?.type === "runtime.capabilities", "runtime.capabilities");
     expect((capabilities.event as Extract<RuntimeEvent, { type: "runtime.capabilities" }>).capabilities.commands.map(command => command.name))
-      .toEqual(["model", "effort", "compact"]);
+      .toEqual(["orbis-detach", "model", "effort", "compact"]);
 
     device.sendPayload(Buffer.from(JSON.stringify({ type: "runtime.command", protocolVersion: PROTOCOL_VERSION, runtimeId: "claude:live-session",
       commandId: "slash-1", command: { type: "slash.execute", name: "compact", args: "" } })));

@@ -187,7 +187,7 @@ export type ClaudeModsBridgeOptions = {
 export class ClaudeModsBridge {
   readonly #options: ClaudeModsBridgeOptions;
   readonly #sessions = new Map<string, Session>();
-  readonly #launches = new Map<string, { expectedSessionId?: string; resolve: (runtime: RuntimeMetadata | undefined) => void; timer: ReturnType<typeof setTimeout> }>();
+  readonly #launches = new Map<string, { expectedSessionId?: string; matchSession?: true; resolve: (runtime: RuntimeMetadata | undefined) => void; timer: ReturnType<typeof setTimeout> }>();
   #toolStore: ToolContentStore | undefined;
   readonly #processControl: ClaudeProcessControl;
 
@@ -240,10 +240,21 @@ export class ClaudeModsBridge {
   }
 
   waitForLaunch(launchId: string, timeoutMs: number, expectedSessionId?: string): Promise<RuntimeMetadata | undefined> {
+    return this.#waitForRuntime(launchId, timeoutMs, expectedSessionId);
+  }
+
+  /** Reattach an existing native process; its reconnect need not have an Orbis launchId. */
+  waitForSession(sessionId: string, timeoutMs: number): Promise<RuntimeMetadata | undefined> {
+    const online = this.#sessions.get(`claude:${sessionId}`)?.runtime;
+    return online ? Promise.resolve(online) : this.#waitForRuntime(randomUUID(), timeoutMs, sessionId, true);
+  }
+
+  #waitForRuntime(launchId: string, timeoutMs: number, expectedSessionId?: string, matchSession?: true): Promise<RuntimeMetadata | undefined> {
     return new Promise(resolve => {
       const timer = setTimeout(() => { this.#launches.delete(launchId); resolve(undefined); }, timeoutMs);
       timer.unref?.();
       this.#launches.set(launchId, { ...(expectedSessionId === undefined ? {} : { expectedSessionId }),
+        ...(matchSession === undefined ? {} : { matchSession }),
         resolve: runtime => { clearTimeout(timer); this.#launches.delete(launchId); resolve(runtime); }, timer });
     });
   }
@@ -323,6 +334,9 @@ export class ClaudeModsBridge {
     void history.refresh().catch(() => undefined);
     const pending = parsed.launchId === undefined ? undefined : this.#launches.get(parsed.launchId);
     if (pending && (pending.expectedSessionId === undefined || pending.expectedSessionId === parsed.sessionId)) pending.resolve(session.runtime);
+    for (const waiting of this.#launches.values()) {
+      if (waiting.matchSession && waiting.expectedSessionId === parsed.sessionId) waiting.resolve(session.runtime);
+    }
     return { ok: true, runtimeId, generation, capabilities: [...capabilities], ...(retained === undefined ? {} : { resumed: true }) };
   }
 
@@ -711,6 +725,7 @@ const SOURCES: Record<string, RuntimeSlashCommand["source"]> = { builtin: "built
 /** The slash menu the phone can use: model and effort as choices, then what runs headless. */
 export function claudeCapabilities(state: ClaudeSessionState, canQuit = false): RuntimeCapabilities {
   const commands: RuntimeSlashCommand[] = canQuit ? [{ name: "quit", description: "关闭这个 Claude Code 会话（保留历史）", source: "builtin" }] : [];
+  commands.push({ name: "orbis-detach", description: "从 Orbis 移除，保留电脑运行", source: "builtin" });
   const models = (state.modelOptions ?? []).filter(option => text(option, 256));
   if (models.length > 0) {
     commands.push({ name: "model", description: `切换模型${state.modelName === undefined ? "" : `（当前 ${state.modelName}）`}`, source: "builtin",

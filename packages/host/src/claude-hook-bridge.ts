@@ -63,6 +63,8 @@ export type ClaudeHookBridgeOptions = {
   baseStatus?: (runtimeId: string) => RuntimeStatus | undefined;
   /** Explicit child Hooks can only use an already identified parent Session. */
   hasSession?: (runtimeId: string) => boolean;
+  /** Detached Sessions leave questions and permissions with the native client. */
+  shouldHandleSession?: (sessionId: string) => boolean;
   onRuntimeOnline?: (runtime: RuntimeMetadata) => void;
   onRuntimeOffline?: (runtimeId: string, reason: string) => void;
   onEvent?: (runtimeId: string, event: RuntimeEvent) => void;
@@ -127,6 +129,7 @@ export class ClaudeHookBridge {
    * native call starts, so that call's classic PreToolUse Hook passes straight through.
    */
   raceQuestion(question: ClaudeRacedQuestion): boolean {
+    if (this.#options.shouldHandleSession?.(question.sessionId) === false) return false;
     const runtimeId = `claude:${question.sessionId}`;
     const existing = this.#raced.get(question.toolCallId);
     if (existing !== undefined) return existing.runtimeId === runtimeId;
@@ -164,6 +167,7 @@ export class ClaudeHookBridge {
   async #accept(input: unknown, signal?: AbortSignal, raced = false): Promise<ClaudeHookOutput> {
     const parsed = parseHookInput(input);
     if (parsed === undefined) throw new ClaudeHookInputError("invalid Claude Hook input");
+    if (this.#options.shouldHandleSession?.(parsed.sessionId) === false) return passthrough();
     if (this.#options.hasRemoteDevice?.() === false) return passthrough();
     // The question dialog is AskUserQuestion's own permission prompt. A phone allow/deny has no answers
     // to give it; the question itself reaches the phone through PreToolUse or the Mods race.

@@ -110,6 +110,41 @@ describe("PiBackend（统一端口的原生实现）", () => {
 });
 
 describe("ClaudeBackend（Hook bridge 的统一端口）", () => {
+  it("detaches an active native Session without quitting and explicitly restores it without a new launch", async () => {
+    const detached = new Set<string>();
+    const events: unknown[] = [];
+    const launch = vi.fn();
+    const bridge = new ClaudeHookBridge();
+    const modsBridge = new ClaudeModsBridge({ createHistory: (id, config, publish) =>
+      new ClaudeSessionHistory(id, config, publish, { locate: async () => undefined }) });
+    const quit = vi.spyOn(modsBridge, "quit");
+    const backend = new ClaudeBackend({ bridge, modsBridge, runtimeIds: () => modsBridge.runtimeIds(),
+      isSessionDetached: id => detached.has(id),
+      detachSession: async (id, acknowledge) => {
+        acknowledge(); detached.add(id); events.push({ offline: `claude:${id}` });
+      },
+      restoreSession: async id => detached.delete(id),
+      launcher: { unavailable: async () => undefined, launch },
+      onCommandResult: (_id, event) => events.push(event) });
+    modsBridge.hello({ type: "hello", instanceId: "active", sessionId: "active", cwd: "/repo", claudeVersion: "2.1.312",
+      bridgeVersion: "4", interactive: true, capabilities: CLAUDE_BRIDGE_CAPABILITIES });
+    modsBridge.receiveEvent("claude:active", modsBridge.generationOf("claude:active")!, { type: "turn.start", turnId: "busy" });
+    expect(backend.dispatchCommand("claude:active", "remove", { type: "slash.execute", name: "orbis-detach", args: "" })).toBe("handled");
+    await vi.waitFor(() => expect(detached.has("active")).toBe(true));
+    expect(events).toEqual([
+      { type: "command.result", commandId: "remove", ok: true, status: "pending" },
+      { type: "command.result", commandId: "remove", ok: true, status: "success" }, { offline: "claude:active" },
+    ]);
+    expect(modsBridge.isOnline("claude:active")).toBe(true);
+    expect(backend.ownsRuntime("claude:active")).toBe(false);
+    expect(backend.directoryEntries()).toEqual([]);
+    expect(quit).not.toHaveBeenCalled();
+    await expect(backend.activate({ type: "resume", sessionId: "active" })).resolves.toEqual({ sessionId: "active", spawnMode: "tui" });
+    expect(backend.directoryEntries()).toHaveLength(1);
+    expect(launch).not.toHaveBeenCalled();
+    modsBridge.close(); bridge.close();
+  });
+
   it.each(["empty", "pending", "hook-only"] as const)("announces a complete home baseline without waiting for history: %s", async mode => {
     const registry = new AgentStateRegistry();
     const facts = new AgentStateFacts({ registry, hostId: "host", kindOf: () => "claude" });

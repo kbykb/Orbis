@@ -178,6 +178,20 @@ describe("ClaudeModsBridge", () => {
     bridge.close();
   });
 
+  it("waits for the same native Session to reconnect without a launchId and times out unrelated Sessions", async () => {
+    vi.useFakeTimers();
+    const bridge = bridgeWith();
+    try {
+      const reconnecting = bridge.waitForSession("session-1", 15_000);
+      const missing = bridge.waitForSession("missing", 15_000);
+      const current = online(bridge);
+      await expect(reconnecting).resolves.toMatchObject({ runtimeId: current.runtimeId });
+      await expect(bridge.waitForSession("session-1", 15_000)).resolves.toMatchObject({ runtimeId: current.runtimeId });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(missing).resolves.toBeUndefined();
+    } finally { bridge.close(); vi.useRealTimers(); }
+  });
+
   it("does not publish a delayed process identity into a replacement generation", async () => {
     let finish!: (value: { pid: number; started: string; executable: string; command: string }) => void;
     const capture = new Promise<{ pid: number; started: string; executable: string; command: string }>(resolve => { finish = resolve; });
@@ -515,12 +529,13 @@ describe("ClaudeModsBridge", () => {
       thinkingLevel: "xhigh", contextUsage: { tokens: 50_000, contextWindow: 200_000, percent: 25 } } });
     const capabilities = events.filter(event => event.type === "runtime.capabilities").at(-1);
     expect(capabilities).toMatchObject({ capabilities: { commands: [
+      { name: "orbis-detach", description: "从 Orbis 移除，保留电脑运行" },
       { name: "model", argument: { kind: "select", options: [{ value: "default" }, { value: "sonnet" }, { value: "opus", description: "当前设置" }] } },
       { name: "effort", argument: { kind: "select" } },
       { name: "compact", source: "builtin" }, { name: "pdf", source: "prompt" }, { name: "diff", source: "extension" },
     ] } });
     expect((capabilities as Extract<RuntimeEvent, { type: "runtime.capabilities" }>).capabilities.commands.map(command => command.name))
-      .toEqual(["model", "effort", "compact", "pdf", "diff"]);
+      .toEqual(["orbis-detach", "model", "effort", "compact", "pdf", "diff"]);
     expect(events.every(event => RuntimeEventSchema.safeParse(event).success)).toBe(true);
     // An unchanged report publishes nothing new.
     const count = events.length;
@@ -628,6 +643,6 @@ describe("ClaudeModsBridge", () => {
   });
 
   it("keeps the effort choice even before the TUI reports its model list", () => {
-    expect(claudeCapabilities({}).commands.map(command => command.name)).toEqual(["effort"]);
+    expect(claudeCapabilities({}).commands.map(command => command.name)).toEqual(["orbis-detach", "effort"]);
   });
 });

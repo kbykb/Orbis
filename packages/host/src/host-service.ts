@@ -320,6 +320,8 @@ export class HostService {
   readonly #claudeBridge: ClaudeHookBridge;
   readonly #claudeModsBridge: ClaudeModsBridge;
   readonly #claudeBackend: ClaudeBackend;
+  readonly #claudeDetachedStore: ClaudeArchiveStore;
+  readonly #claudeDetachedSessions = new Set<string>();
   readonly #claudePublishedRuntimes = new Set<string>();
   readonly #claudeRejections = new Map<string, number>();
   #claudeLaunchable = false;
@@ -446,6 +448,7 @@ export class HostService {
   }
 
   #registerClaudeRuntime(runtime: RuntimeMetadata): void {
+    if (this.#isClaudeDetached(runtime.runtimeId)) return;
     // Hooks and Mods share one public runtime. Keep Mods' history capability when a
     // permission Hook contributes its waiting status, just as directory snapshots do.
     runtime = this.#claudeBackend.directoryEntries().find(candidate => candidate.runtimeId === runtime.runtimeId) ?? runtime;
@@ -475,12 +478,59 @@ export class HostService {
   }
 
   #unregisterClaudeRuntime(runtimeId: string, reason: string): void {
+    if (this.#isClaudeDetached(runtimeId)) return;
     if (this.#claudeBridge.runtimeIds().includes(runtimeId) || this.#claudeModsBridge.runtimeIds().includes(runtimeId)) return;
     if (!this.#claudePublishedRuntimes.delete(runtimeId) && this.#agentFacts.scopeOf(runtimeId) === undefined) return;
     this.#markRuntimeOffline(runtimeId, reason);
     this.#notifications.offline(runtimeId);
     this.#broadcastDeviceMessage({ type: "runtime.offline", runtimeId, reason });
     this.refreshHostFacts();
+  }
+
+  #isClaudeDetached(runtimeId: string): boolean {
+    return runtimeId.startsWith("claude:") && this.#claudeDetachedSessions.has(runtimeId.slice("claude:".length));
+  }
+
+  /** Remove one Session from Orbis while its native Claude Code process keeps running. */
+  async detachClaudeSession(sessionId: string): Promise<void> {
+    await this.#detachClaudeSession(sessionId);
+  }
+
+  async #detachClaudeSession(sessionId: string, beforeOffline?: () => void): Promise<void> {
+    if (this.#claudeDetachedSessions.has(sessionId)) { beforeOffline?.(); return; }
+    await this.#claudeDetachedStore.set(sessionId, true);
+    // A command receipt must reach its owner before runtimeOffline settles pending commands.
+    beforeOffline?.();
+    this.#claudeDetachedSessions.add(sessionId);
+    const runtimeId = `claude:${sessionId}`;
+    // Empty Hook output defers to the native dialog; detaching never grants permission.
+    this.#claudeBridge.cancelRuntime(runtimeId, "owner_closed");
+    this.#interactionIds.delete(runtimeId);
+    if (this.#claudePublishedRuntimes.delete(runtimeId) || this.#agentFacts.scopeOf(runtimeId) !== undefined) {
+      this.#markRuntimeOffline(runtimeId, "detached_from_orbis");
+      this.#notifications.offline(runtimeId);
+      this.#broadcastDeviceMessage({ type: "runtime.offline", runtimeId, reason: "detached_from_orbis" });
+      this.refreshHostFacts();
+    }
+  }
+
+  /** Explicitly reopening a saved Session restores the existing bridge before considering a launch. */
+  async restoreClaudeSession(sessionId: string): Promise<boolean> {
+    if (!this.#claudeDetachedSessions.has(sessionId)) return false;
+    const runtimeId = `claude:${sessionId}`;
+    if (!await this.#claudeModsBridge.waitForSession(sessionId, 15_000)) {
+      throw new ActivationError("spawn_failed", "原有 Claude Code 尚未重新连接，请稍后重试；会话仍从 Orbis 移除，未重复启动进程。");
+    }
+    await this.#claudeDetachedStore.set(sessionId, false);
+    const runtime = this.#claudeModsBridge.runtimeMetadata().find(item => item.runtimeId === runtimeId);
+    if (!runtime) {
+      await this.#claudeDetachedStore.set(sessionId, true);
+      throw new ActivationError("spawn_failed", "原有 Claude Code 连接已断开，请稍后重试；未重复启动进程。");
+    }
+    this.#claudeDetachedSessions.delete(sessionId);
+    this.#registerClaudeRuntime(runtime);
+    this.#claudeBackend.announce(runtimeId);
+    return true;
   }
 
   /**
@@ -707,6 +757,7 @@ export class HostService {
   ) {
     this.#options = { ...options, relayHistoryMode: relayHistoryMode(options.relayHistoryMode) };
     this.#stateDir = stateDir;
+    this.#claudeDetachedStore = new ClaudeArchiveStore(join(stateDir, "claude-detached-sessions.json"));
     this.#sessionConfigurations = new SessionConfigurationStore(join(stateDir, "session-configuration.json"));
     // 记录要跨重启保留：重启后「上一轮为什么连不上」仍然读得到，否则排查只能靠现场的这一次。
     this.#diagnostics = new DiagnosticJournal({ persistence: createDiagnosticJournalFileStore(stateDir) });
@@ -800,16 +851,19 @@ export class HostService {
       hasRemoteDevice: () => [...this.#links.values()].some(link => link.active !== undefined),
       baseStatus: runtimeId => this.#claudeModsBridge.statusOf(runtimeId),
       hasSession: runtimeId => this.#claudeModsBridge.isOnline(runtimeId),
+      shouldHandleSession: sessionId => !this.#claudeDetachedSessions.has(sessionId),
       onRuntimeOnline: runtime => this.#registerClaudeRuntime(runtime),
       onRuntimeOffline: (runtimeId, reason) => this.#unregisterClaudeRuntime(runtimeId, reason),
       onEvent: (runtimeId, event) => this.#publishRuntimeEvent(runtimeId, event),
     });
     this.#claudeModsBridge = new ClaudeModsBridge({
       hostId: () => this.#identity.hostId,
-      beforeFileChangeTurn: (runtimeId, turnId, signal) => this.#fileChangeTurns.begin(runtimeId, turnId, true, true, true, signal),
-      onFileChangeBoundaryLost: (runtimeId, turnId) => this.#fileChanges.markUnreliable(runtimeId, "capture-barrier-disconnected", turnId),
-      afterFileChangeTurn: (runtimeId, turnId, outcome) => this.#fileChangeTurns.finish(runtimeId, { turnId, outcome, force: true }),
-      onFileChangeAnchor: (runtimeId, turnId, entryId) => this.#fileChanges.observeAnchor(runtimeId, turnId, entryId),
+      beforeFileChangeTurn: (runtimeId, turnId, signal) => this.#isClaudeDetached(runtimeId) ? Promise.resolve()
+        : this.#fileChangeTurns.begin(runtimeId, turnId, true, true, true, signal),
+      onFileChangeBoundaryLost: (runtimeId, turnId) => { if (!this.#isClaudeDetached(runtimeId)) this.#fileChanges.markUnreliable(runtimeId, "capture-barrier-disconnected", turnId); },
+      afterFileChangeTurn: (runtimeId, turnId, outcome) => this.#isClaudeDetached(runtimeId) ? Promise.resolve()
+        : this.#fileChangeTurns.finish(runtimeId, { turnId, outcome, force: true }),
+      onFileChangeAnchor: (runtimeId, turnId, entryId) => { if (!this.#isClaudeDetached(runtimeId)) this.#fileChanges.observeAnchor(runtimeId, turnId, entryId); },
       onRuntimeOnline: runtime => this.#registerClaudeRuntime(runtime),
       // A Hook can keep the runtime online for an interaction while the Mods poller reconnects.
       // Only remove the public runtime after both sources have gone offline. A raced question
@@ -833,6 +887,9 @@ export class HostService {
     const claudeConfig = claudeConfigDir(claudeOptions?.configDir ?? process.env.CLAUDE_CONFIG_DIR);
     this.#claudeBackend = new ClaudeBackend({ bridge: this.#claudeBridge, modsBridge: this.#claudeModsBridge,
       runtimeIds: () => [...new Set([...this.#claudeBridge.runtimeIds(), ...this.#claudeModsBridge.runtimeIds()])],
+      isSessionDetached: sessionId => this.#claudeDetachedSessions.has(sessionId),
+      detachSession: (sessionId, beforeOffline) => this.#detachClaudeSession(sessionId, beforeOffline),
+      restoreSession: sessionId => this.restoreClaudeSession(sessionId),
       ...(claudeOptions === undefined ? {} : {
         configDirs: () => [claudeConfig],
         catalog: new ClaudeSessionCatalog(),
@@ -901,6 +958,7 @@ export class HostService {
     this.#fileChanges = new TurnFileChangeService({
       directory: join(stateDir, "turn-file-changes"), scope: changeScope,
       send: (deviceId, runtimeId, event) => {
+        if (this.#isClaudeDetached(runtimeId)) return false;
         const link = this.#links.get(deviceId); if (!link) return false;
         const message = this.#runtimeEventMessage(runtimeId, event), payload = this.#encodeMeasured(message);
         return event.type === "session.change.detail.page"
@@ -908,6 +966,7 @@ export class HostService {
           : link.send(payload, channelForDeviceMessage(message), outboundQueueSource(message, payload.byteLength));
       },
       publish: (runtimeId, summary) => {
+        if (this.#isClaudeDetached(runtimeId)) return;
         this.#agentStateRegistry.commitValue({ kind: "agent", key: summary.agent }, "changes", {
           source: { producer: "host", sourceId: "turn-file-changes", sourceEpoch: this.#changesEpoch, sourceRevision: ++this.#changesRevision },
           availability: "ready", completeness: "complete",
@@ -1108,6 +1167,7 @@ export class HostService {
     const identity = await loadOrCreateHostIdentity({ dir: stateDir });
     const store = await loadDeviceStore(stateDir);
     const service = new HostService(options, stateDir, identity, store);
+    for (const id of await service.#claudeDetachedStore.archived()) service.#claudeDetachedSessions.add(id);
     try {
       const ids: unknown = JSON.parse(await readFile(join(stateDir, "codex-desktop-threads.json"), "utf8"));
       if (Array.isArray(ids)) {
@@ -2582,9 +2642,12 @@ export class HostService {
 
   async #recoverSessionLaunch(deviceId: string, launchId: string): Promise<void> {
     const prior = await this.#sessionConfigurations.result(deviceId, launchId, launchId);
+    // A background receipt lookup is not an explicit request to reopen a detached Session.
+    if (prior?.agentKind === "claude" && prior.sessionId && this.#claudeDetachedSessions.has(prior.sessionId)) return;
     if (prior?.phase === "unknown" && !prior.sessionId && prior.agentKind) {
       const backend = await this.#configuredBackend(prior.agentKind);
       const expectedSessionId = await this.#sessionConfigurations.expectedSessionId(deviceId, launchId);
+      if (prior.agentKind === "claude" && expectedSessionId && this.#claudeDetachedSessions.has(expectedSessionId)) return;
       // Legacy unknown records without a reserved identity cannot safely adopt an
       // arbitrary hello: the native process may already have switched sessions.
       const found = expectedSessionId === undefined ? undefined : backend.findLaunch?.(launchId, expectedSessionId);
@@ -2987,6 +3050,7 @@ export class HostService {
   }
 
   #publishRuntimeEvent(runtimeId: string, event: RuntimeEvent): void {
+    if (this.#isClaudeDetached(runtimeId)) return;
     this.#fileChangeTurns.observe(runtimeId, event);
     if (event.type === "tool.activity") return;
     if (event.type === "session.tools.produced") {

@@ -175,15 +175,17 @@ export class ClaudeArchiveStore {
   async archived(): Promise<ReadonlySet<string>> { return await this.#load(); }
 
   async set(sessionId: string, archived: boolean): Promise<void> {
-    const ids = await this.#load();
-    if (archived === ids.has(sessionId)) return;
-    if (archived) ids.add(sessionId); else ids.delete(sessionId);
-    const content = `${JSON.stringify({ version: 1, sessionIds: [...ids].sort() })}\n`;
     const write = this.#write.then(async () => {
+      const current = await this.#load();
+      if (archived === current.has(sessionId)) return;
+      const ids = new Set(current);
+      if (archived) ids.add(sessionId); else ids.delete(sessionId);
+      const content = `${JSON.stringify({ version: 1, sessionIds: [...ids].sort() })}\n`;
       await mkdir(dirname(this.#path), { recursive: true });
       const temporary = `${this.#path}.${process.pid}.tmp`;
       await writeFile(temporary, content, { mode: 0o600 });
       await rename(temporary, this.#path);
+      this.#ids = ids;
     });
     this.#write = write.catch(() => undefined);
     await write;

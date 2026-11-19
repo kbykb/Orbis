@@ -60,6 +60,20 @@ describe("ClaudeSessionCatalog", () => {
 });
 
 describe("ClaudeArchiveStore", () => {
+  it("serializes concurrent state changes and only commits memory after saving", async () => {
+    const dir = await temp();
+    const parent = join(dir, "state");
+    const path = join(parent, "sessions.json");
+    const store = new ClaudeArchiveStore(path);
+    await writeFile(parent, "blocked directory");
+    await expect(store.set("first", true)).rejects.toThrow();
+    expect([...await store.archived()]).toEqual([]);
+    await rm(parent);
+    await Promise.all([store.set("first", true), store.set("second", true), store.set("first", false)]);
+    expect([...await store.archived()]).toEqual(["second"]);
+    expect([...await new ClaudeArchiveStore(path).archived()]).toEqual(["second"]);
+  });
+
   it("persists archived Session ids without touching transcripts", async () => {
     const dir = await temp();
     const path = join(dir, "state", "claude-archive.json");

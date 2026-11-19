@@ -153,6 +153,34 @@ describe("ClaudeHookBridge", () => {
     expect(bridge.runtimeIds()).toEqual([]);
   });
 
+  it("keeps a detached Session's permissions and questions in the native client, including pending Hooks", async () => {
+    const online = vi.fn();
+    const events: RuntimeEvent[] = [];
+    let detached = false;
+    const bridge = new ClaudeHookBridge({ shouldHandleSession: () => !detached,
+      onRuntimeOnline: online, onEvent: (_id, event) => events.push(event) });
+    const pending = bridge.accept(permission());
+    expect(online).toHaveBeenCalledOnce();
+    detached = true;
+    bridge.cancelRuntime("claude:session-1", "owner_closed");
+    await expect(pending).resolves.toEqual({});
+    events.length = 0; online.mockClear();
+    await expect(bridge.accept(permission())).resolves.toEqual({});
+    await expect(bridge.accept(ask())).resolves.toEqual({});
+    expect(bridge.raceQuestion({ sessionId: "session-1", cwd: "/repo", toolCallId: "question", questions })).toBe(false);
+    expect(bridge.questionAnswers("claude:session-1")).toEqual([]);
+    expect(online).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(bridge.runtimeIds()).toEqual([]);
+
+    detached = false;
+    const restored = bridge.accept(permission());
+    expect(online).toHaveBeenCalledOnce();
+    bridge.cancelRuntime("claude:session-1", "owner_closed");
+    await expect(restored).resolves.toEqual({});
+    bridge.close();
+  });
+
   it("publishes the runtime only while interactions are pending and restores the Mods status", async () => {
     const events: RuntimeEvent[] = [];
     const offline = vi.fn();
