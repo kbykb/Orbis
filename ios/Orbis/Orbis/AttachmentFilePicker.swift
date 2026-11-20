@@ -68,13 +68,12 @@ struct AttachmentFilePicker: UIViewControllerRepresentable {
             MobileDiagnostics.shared.record("attachment.picker.created", detail: ["attemptId": attemptId])
             picker.allowsMultipleSelection = true
             picker.shouldShowFileExtensions = true
-            picker.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             picker.modalPresentationStyle = .fullScreen
             picker.delegate = self
             self.picker = picker
             activeAttemptId = attemptId
             MobileDiagnostics.shared.record("attachment.picker.configured", detail: [
-                "attemptId": attemptId, "directory": "app_documents", "asCopy": "false", "presentation": "native_full_screen"
+                "attemptId": attemptId, "directory": "system_default", "asCopy": "false", "presentation": "native_full_screen"
             ])
             present(picker, animated: true) { [weak self, weak picker] in
                 guard let self, let picker, self.picker === picker else { return }
