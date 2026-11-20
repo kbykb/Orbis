@@ -319,13 +319,14 @@ struct ChatComposerView: View, Equatable {
             .photosPicker(isPresented: $photoPickerOpen, selection: $selectedPhotos,
                           maxSelectionCount: max(1, photoSelection?.capacity ?? 10), matching: .images,
                           preferredItemEncoding: .compatible)
-            .sheet(item: $fileSelection) { selection in
-                AttachmentFilePicker(attemptId: selection.id, onPick: { urls in
+            .background {
+                AttachmentFilePicker(attemptId: fileSelection?.id, onPick: { attemptId, urls in
+                    guard let selection = fileSelection, selection.id == attemptId else { return }
                     fileSelection = nil
                     selection.actions.upload(urls, capacity: selection.capacity)
-                }, onCancel: {
-                    fileSelection = nil
-                })
+                }, onCancel: { attemptId in
+                    if fileSelection?.id == attemptId { fileSelection = nil }
+                }).frame(width: 0, height: 0).allowsHitTesting(false)
             }
             .orbisBottomSheet(isPresented: $permissionsOpen) {
                 PermissionsView(target: target, runtime: actions.runtime ?? fallbackRuntime).orbisSheet([.large])
